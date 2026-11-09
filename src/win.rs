@@ -61,6 +61,20 @@ pub fn find_window(title: &str) -> Option<isize> {
     (!h.is_null()).then_some(h as isize)
 }
 
+/// Is Starlite the app in front? True when the foreground window belongs to
+/// this process (the main window with its YouTube player, file dialogs),
+/// except `ignore` (the mini player itself, which doesn't count as "in").
+pub fn app_in_front(ignore: Option<isize>) -> bool {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.is_null() || ignore == Some(fg as isize) {
+        return false;
+    }
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(fg, &mut pid) };
+    pid == std::process::id()
+}
+
 /// Is the Windows taskbar light (Settings → Personalization → Colors)?
 pub fn taskbar_is_light() -> bool {
     use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};

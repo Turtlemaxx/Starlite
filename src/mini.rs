@@ -1,4 +1,5 @@
-//! Mini player: while Starlite is minimized and a song is loaded, a small
+//! Mini player: while you're in another app (or Starlite is minimized) and a
+//! song is loaded, a small
 //! always-on-top card is docked to an edge of the screen. At rest it shows
 //! only the album cover with the song name under it; hovering slides it
 //! further out to reveal compact controls next to the cover. Its background is
@@ -117,7 +118,7 @@ pub struct Mini {
     pub prefs: MiniPrefs,
     /// Customize mode (from Settings).
     pub editing: bool,
-    /// Closed with its X: stays away until Starlite is minimized again.
+    /// Closed with its X: stays away until you leave Starlite again.
     pub dismissed: bool,
     rt: Runtime,
 }
@@ -407,6 +408,11 @@ impl Starlite {
         }
         self.run_actions(ctx, actions, track);
         animating
+    }
+
+    /// The card's window, while it's shown.
+    pub fn mini_hwnd(&self) -> Option<isize> {
+        self.mini.rt.hwnd
     }
 
     /// Call when the card isn't shown, so it slides in and gets restyled next time.

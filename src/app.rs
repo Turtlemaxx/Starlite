@@ -1531,13 +1531,16 @@ impl eframe::App for Starlite {
             self.run_actions(ctx, po.actions, track);
         }
 
-        // Mini player while minimized with a song loaded.
+        // Mini player while you're in another app (or Starlite is minimized)
+        // and a song is loaded. Starlite's own windows (its YouTube player,
+        // file dialogs) still count as "in"; the card itself doesn't.
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
-        if (minimized && self.now.is_some() && !self.mini.dismissed && self.mini.prefs.enabled) || self.mini.editing {
+        let away = minimized || !crate::win::app_in_front(self.mini_hwnd());
+        if (away && self.now.is_some() && !self.mini.dismissed && self.mini.prefs.enabled) || self.mini.editing {
             animating |= self.mini_player(ctx, &mut icons);
         } else {
             self.mini_hidden();
-            if !minimized {
+            if !away {
                 self.mini.dismissed = false;
             }
         }

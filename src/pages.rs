@@ -577,7 +577,7 @@ impl Starlite {
                 // Mini player: on / off and the customize mode.
                 let w = content.width().min(520.0);
                 let mut on = self.mini.prefs.enabled;
-                if toggle_row(ui, Rect::from_min_size(pos2(x0, top), vec2(w, 52.0)), Id::new("mini_on"), "Mini player", Some("Shows up at the edge of the screen while Starlite is minimized"), &mut on, theme) {
+                if toggle_row(ui, Rect::from_min_size(pos2(x0, top), vec2(w, 52.0)), Id::new("mini_on"), "Mini player", Some("Shows up at the edge of the screen while you're in another app"), &mut on, theme) {
                     self.sound.click();
                     self.mini.prefs.enabled = on;
                     if !on {

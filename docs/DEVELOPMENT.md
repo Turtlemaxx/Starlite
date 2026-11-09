@@ -55,12 +55,13 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   made from the cover's colours. Lyrics come from the song's tags or a `.lrc`
   file with the same name. Timed (LRC) lyrics follow the song, and clicking a
   line jumps there. YouTube songs show their video instead of the cover.
-- **Mini player:** minimize Starlite while a song is loaded and a small card
+- **Mini player:** switch to another app (or minimize Starlite) while a song
+  is loaded and a small card
   slides out of the right edge of the screen, showing the album cover with
   the song name under it, on a background made from the cover's colours.
   Hover it to slide out the controls: seek, loop, previous, play/pause, next,
   like and volume. It slides back in as soon as the mouse leaves. Click the
-  cover to bring Starlite back. The X hides it until you minimize again.
+  cover to bring Starlite back. The X hides it until you leave Starlite again.
   **Settings → Mini player → Change position & size** opens a customize mode:
   drag the card anywhere (it snaps to the nearest left or right screen edge,
   on any monitor), change its size (80–140 %) and turn each control on or off.
@@ -113,7 +114,7 @@ they stay sharp at any size and mid-animation.
 | `src/pages.rs` | Explore, playlist pages, Settings |
 | `src/player.rs` | player bar (seek, controls) |
 | `src/nowplaying.rs` | full screen Now Playing, lyrics, cover palette |
-| `src/mini.rs` | mini player card shown while minimized |
+| `src/mini.rs` | mini player card shown while you're in another app |
 | `src/navidrome.rs` | Navidrome / Subsonic API client |
 | `src/meta.rs` | tags, cover art and lyrics from audio files |
 | `src/audio.rs` | playback engine (rodio) |
