@@ -586,8 +586,14 @@ impl Starlite {
                     self.mini.prefs.save();
                 }
                 if on {
+                    let mut only = self.mini.prefs.only_when_playing;
+                    if toggle_row(ui, Rect::from_min_size(pos2(x0, top + 60.0), vec2(w, 52.0)), Id::new("mini_only_playing"), "Only while music is playing", Some("Off: also shows when the song is paused"), &mut only, theme) {
+                        self.sound.click();
+                        self.mini.prefs.only_when_playing = only;
+                        self.mini.prefs.save();
+                    }
                     let editing = self.mini.editing;
-                    let r = Rect::from_min_size(pos2(x0, top + 70.0), vec2(if editing { 132.0 } else { 236.0 }, 38.0));
+                    let r = Rect::from_min_size(pos2(x0, top + 130.0), vec2(if editing { 132.0 } else { 236.0 }, 38.0));
                     let label = if editing { "Done" } else { "Change position & size" };
                     if pill(ui, icons, els, ppp, Id::new("mini_customize"), r, label, Some(if editing { "check" } else { "maximize-2" }), true, false, theme).clicked() {
                         self.sound.click();

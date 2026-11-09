@@ -24,7 +24,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 <p align="center"><img src="docs/screenshots/fullscreen.png" width="720" alt="Full screen Now Playing"></p>
 
-**Mini player.** Switch to another app (or minimize Starlite) and a small card slides out of the screen edge with the cover and song. Hover it for controls. You can move it, resize it, pick its buttons, or turn it off in Settings.
+**Mini player.** Switch to another app (or minimize Starlite) and a small card slides out of the screen edge with the cover and song. Hover it for controls. You can move it, resize it, pick its buttons, show it only while music is playing, or turn it off in Settings.
 
 <p align="center"><img src="docs/screenshots/mini-player.png" width="357" alt="Mini player"></p>
 

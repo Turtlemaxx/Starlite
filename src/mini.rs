@@ -52,6 +52,8 @@ pub const CONTROLS: [(&str, &str); 7] = [
 pub struct MiniPrefs {
     /// Show the card at all (Settings → Mini player).
     pub enabled: bool,
+    /// Only if music was playing when you left (a paused song: no card).
+    pub only_when_playing: bool,
     /// Docked to the right edge (else the left one).
     pub right: bool,
     /// Top of the card as a fraction of the work area's height.
@@ -64,7 +66,7 @@ pub struct MiniPrefs {
 
 impl Default for MiniPrefs {
     fn default() -> Self {
-        Self { enabled: true, right: true, y_frac: 0.2, monitor: None, scale: 1.0, hidden: Vec::new() }
+        Self { enabled: true, only_when_playing: false, right: true, y_frac: 0.2, monitor: None, scale: 1.0, hidden: Vec::new() }
     }
 }
 
@@ -120,13 +122,30 @@ pub struct Mini {
     pub editing: bool,
     /// Closed with its X: stays away until you leave Starlite again.
     pub dismissed: bool,
+    /// Music was playing while you were away, so the card may show. Paused
+    /// when you left: no card (pausing from the card keeps it, though).
+    pub armed: bool,
     rt: Runtime,
 }
 
 impl Mini {
+    /// Called every frame: should the card be up? `away` = you're in another
+    /// app or Starlite is minimized. With "only while music is playing", the
+    /// card needs music playing at some point while you're away, so leaving
+    /// with a paused song shows nothing, but pausing from the card keeps it.
+    pub fn wants(&mut self, away: bool, playing: bool, has_track: bool) -> bool {
+        if !away {
+            self.armed = false;
+            self.dismissed = false;
+        } else if playing {
+            self.armed = true;
+        }
+        self.editing || (away && has_track && !self.dismissed && self.prefs.enabled && (self.armed || !self.prefs.only_when_playing))
+    }
+
     pub fn new() -> Self {
         // Debug: STARLITE_MINI_EDIT=1 starts in customize mode.
-        Self { prefs: MiniPrefs::load(), editing: std::env::var("STARLITE_MINI_EDIT").is_ok(), dismissed: false, rt: Runtime::default() }
+        Self { prefs: MiniPrefs::load(), editing: std::env::var("STARLITE_MINI_EDIT").is_ok(), dismissed: false, armed: false, rt: Runtime::default() }
     }
 }
 
@@ -642,5 +661,82 @@ impl Starlite {
                 actions.push(Action::Volume(vol));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mini(only_when_playing: bool) -> Mini {
+        let mut m = Mini::default();
+        m.prefs = MiniPrefs { only_when_playing, ..Default::default() };
+        m
+    }
+
+    #[test]
+    fn hidden_while_in_starlite() {
+        let mut m = mini(true);
+        assert!(!m.wants(false, true, true));
+        let mut m = mini(false);
+        assert!(!m.wants(false, true, true));
+    }
+
+    #[test]
+    fn leaving_while_playing_shows_it() {
+        let mut m = mini(true);
+        m.wants(false, true, true);
+        assert!(m.wants(true, true, true));
+    }
+
+    #[test]
+    fn leaving_while_paused_shows_nothing() {
+        let mut m = mini(true);
+        m.wants(false, false, true);
+        assert!(!m.wants(true, false, true));
+        assert!(!m.wants(true, false, true), "still nothing while away and paused");
+        // Music starts while away (e.g. from somewhere else): now it shows.
+        assert!(m.wants(true, true, true));
+    }
+
+    #[test]
+    fn pausing_from_the_card_keeps_it() {
+        let mut m = mini(true);
+        m.wants(false, true, true);
+        assert!(m.wants(true, true, true));
+        assert!(m.wants(true, false, true), "paused from the card");
+    }
+
+    #[test]
+    fn coming_back_resets_it() {
+        let mut m = mini(true);
+        m.wants(true, true, true);
+        m.wants(false, false, true); // back in Starlite, pauses there
+        assert!(!m.wants(true, false, true), "left again while paused");
+    }
+
+    #[test]
+    fn option_off_shows_even_when_paused() {
+        let mut m = mini(false);
+        m.wants(false, false, true);
+        assert!(m.wants(true, false, true));
+    }
+
+    #[test]
+    fn x_hides_until_next_time() {
+        let mut m = mini(false);
+        assert!(m.wants(true, true, true));
+        m.dismissed = true;
+        assert!(!m.wants(true, true, true));
+        m.wants(false, true, true);
+        assert!(m.wants(true, true, true), "back after leaving again");
+    }
+
+    #[test]
+    fn needs_a_song_and_the_switch_on() {
+        let mut m = mini(false);
+        assert!(!m.wants(true, false, false), "no song loaded");
+        m.prefs.enabled = false;
+        assert!(!m.wants(true, true, true), "mini player off");
     }
 }

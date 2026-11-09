@@ -1391,6 +1391,11 @@ impl eframe::App for Starlite {
                 self.seek_to(v.parse().unwrap_or(0.0));
             }
         }
+        // Debug: STARLITE_PAUSE=1 pauses once playback has started.
+        static PAUSE_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if std::env::var("STARLITE_PAUSE").is_ok() && self.playback_status() == Status::Playing && !PAUSE_DONE.swap(true, Ordering::Relaxed) {
+            self.audio.pause();
+        }
         let status = self.playback_status();
         if status != self.last_status {
             if let Status::Error(e) = &status {
@@ -1536,13 +1541,12 @@ impl eframe::App for Starlite {
         // file dialogs) still count as "in"; the card itself doesn't.
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
         let away = minimized || !crate::win::app_in_front(self.mini_hwnd());
-        if (away && self.now.is_some() && !self.mini.dismissed && self.mini.prefs.enabled) || self.mini.editing {
+        let playing = matches!(self.playback_status(), Status::Playing | Status::Loading);
+        let has_track = self.now.is_some();
+        if self.mini.wants(away, playing, has_track) {
             animating |= self.mini_player(ctx, &mut icons);
         } else {
             self.mini_hidden();
-            if !away {
-                self.mini.dismissed = false;
-            }
         }
 
         // Discord status (only real changes reach Discord).
