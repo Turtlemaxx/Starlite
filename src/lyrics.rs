@@ -69,6 +69,8 @@ impl Found {
 #[derive(Deserialize, Default, Clone)]
 #[serde(default, rename_all = "camelCase")]
 struct Hit {
+    track_name: String,
+    artist_name: String,
     duration: Option<f64>,
     instrumental: bool,
     plain_lyrics: Option<String>,
@@ -110,7 +112,90 @@ pub fn online(t: &Track) -> Option<Lyrics> {
 }
 
 fn cache_key(q: &Query) -> String {
-    crate::navidrome::md5_hex(&format!("{}|{}|{}", q.artist.to_lowercase(), q.title.to_lowercase(), q.secs.unwrap_or(0)))
+    // "v2": looked up with the looser matching (older misses are asked again).
+    crate::navidrome::md5_hex(&format!("v2|{}|{}|{}", q.artist.to_lowercase(), q.title.to_lowercase(), q.secs.unwrap_or(0)))
+}
+
+/// Words that only say which version / release a song is.
+const VERSION_WORDS: [&str; 21] = [
+    "remaster", "explicit", "clean", "version", "edit", "mono", "stereo", "deluxe", "bonus", "feat", "ft.", "featuring", "with ", "prod", "mix",
+    "live", "single", "album", "radio", "bpm", "sped up",
+];
+
+fn is_version_note(s: &str) -> bool {
+    let l = s.to_lowercase();
+    let l = l.trim();
+    VERSION_WORDS.iter().any(|w| l.contains(w) || l.starts_with("ft ")) || (l.len() == 4 && l.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// "Heartless - 2011 Remaster", "Song (feat. X) [Explicit]" → "Heartless", "Song".
+fn strip_versions(title: &str) -> String {
+    let mut out = String::new();
+    let mut rest = title;
+    while let Some(open) = rest.find(['(', '[']) {
+        let close = if rest[open..].starts_with('(') { ')' } else { ']' };
+        let Some(len) = rest[open..].find(close) else { break };
+        out.push_str(&rest[..open]);
+        if !is_version_note(&rest[open + 1..open + len]) {
+            out.push_str(&rest[open..=open + len]);
+        }
+        rest = &rest[open + len + 1..];
+    }
+    out.push_str(rest);
+    // A version after " - ", and a trailing "feat. X" outside brackets.
+    if let Some((a, b)) = out.rsplit_once(" - ") {
+        if is_version_note(b) {
+            out = a.to_string();
+        }
+    }
+    let lower = out.to_lowercase();
+    if let Some(i) = [" feat. ", " feat ", " ft. ", " featuring "].iter().filter_map(|m| lower.find(m)).min() {
+        out.truncate(i);
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The first artist of "A, B", "A feat. B", "A & B", "A; B", "A x B", "A / B".
+fn primary_artist(artist: &str) -> String {
+    let lower = artist.to_lowercase();
+    let cut = [",", ";", " & ", " feat", " ft.", " ft ", " x ", " with ", "/", " • ", " and "].iter().filter_map(|m| lower.find(m)).filter(|&i| i > 0).min();
+    artist[..cut.unwrap_or(artist.len())].trim().to_string()
+}
+
+/// Lowercase letters and digits only ("&" counts as "and").
+fn norm(s: &str) -> String {
+    s.to_lowercase().replace('&', "and").chars().filter(|c| c.is_alphanumeric()).collect()
+}
+
+/// A title without anything in brackets or version notes, normalized.
+fn core(title: &str) -> String {
+    let t = strip_versions(title);
+    let mut out = String::new();
+    let mut depth = 0;
+    for c in t.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    let n = norm(&out);
+    if n.is_empty() {
+        norm(&t)
+    } else {
+        n
+    }
+}
+
+/// Is this record the same song? lrclib's search is fuzzy, so check title
+/// and artist (records are sometimes titled "Artist - Song").
+fn same_song(h: &Hit, q: &Query) -> bool {
+    let (ot, ht) = (core(&q.title), core(&h.track_name));
+    let title = !ot.is_empty() && (ht.contains(&ot) || (ht.len() >= 3 && ot.contains(&ht)));
+    let (oa, op, ha, hp) = (norm(&q.artist), norm(&primary_artist(&q.artist)), norm(&h.artist_name), norm(&primary_artist(&h.artist_name)));
+    let artist = op.is_empty() || ha.contains(&op) || (!hp.is_empty() && oa.contains(&hp));
+    title && artist
 }
 
 fn get(url: &str) -> Result<Option<serde_json::Value>, ()> {
@@ -122,42 +207,65 @@ fn get(url: &str) -> Result<Option<serde_json::Value>, ()> {
     }
 }
 
-/// Search first (quick, only lrclib's own catalogue); if that has nothing,
-/// the exact lookup (which may also ask other lyrics sources). Err/None on
-/// a network error.
-fn lookup(q: &Query) -> Option<Found> {
-    let search = |params: String| -> Option<Vec<Hit>> {
-        let v = get(&format!("{API}/search?{params}")).ok()?;
-        Some(v.and_then(|v| serde_json::from_value::<Vec<Hit>>(v).ok()).unwrap_or_default())
-    };
-    let mut hits = search(format!("track_name={}&artist_name={}", enc(&q.title), enc(&q.artist)))?;
-    if pick(&hits, q).is_none() {
-        hits.extend(search(format!("q={}", enc(&format!("{} {}", q.artist, q.title))))?);
+/// The searches to try, most exact first: as tagged, without version notes
+/// ("- 2011 Remaster", "[Explicit]", "feat. X"), with only the first artist,
+/// then a free-text search. Duplicates are skipped.
+fn searches(q: &Query) -> Vec<String> {
+    let (title, clean, core_title) = (q.title.clone(), strip_versions(&q.title), {
+        let s = strip_versions(&q.title);
+        s.split(['(', '[']).next().unwrap_or(&s).trim().to_string()
+    });
+    let (artist, first) = (q.artist.clone(), primary_artist(&q.artist));
+    let mut out: Vec<String> = Vec::new();
+    for (t, a) in [(&clean, &artist), (&clean, &first), (&title, &artist), (&core_title, &first)] {
+        if t.is_empty() || a.is_empty() {
+            continue;
+        }
+        let s = format!("track_name={}&artist_name={}", enc(t), enc(a));
+        if !out.contains(&s) {
+            out.push(s);
+        }
     }
-    if pick(&hits, q).is_none() {
-        if let (Some(album), Some(secs)) = (&q.album, q.secs) {
-            let url = format!("{API}/get?track_name={}&artist_name={}&album_name={}&duration={secs}", enc(&q.title), enc(&q.artist), enc(album));
-            if let Ok(Some(v)) = get(&url) {
-                hits.extend(serde_json::from_value::<Hit>(v).ok());
-            }
+    out.push(format!("q={}", enc(&format!("{first} {core_title}"))));
+    out
+}
+
+/// Searches lrclib's catalogue until a record of this song turns up; then
+/// the exact lookup (which may also ask other lyrics sources). None on a
+/// network error.
+fn lookup(q: &Query) -> Option<Found> {
+    let mut hits: Vec<Hit> = Vec::new();
+    for params in searches(q) {
+        let v = get(&format!("{API}/search?{params}")).ok()?;
+        hits.extend(v.and_then(|v| serde_json::from_value::<Vec<Hit>>(v).ok()).unwrap_or_default());
+        if let Some(f) = pick(&hits, q).filter(|f| f.synced.is_some() || f.instrumental) {
+            return Some(f);
+        }
+    }
+    if let (Some(album), Some(secs)) = (&q.album, q.secs) {
+        let url = format!("{API}/get?track_name={}&artist_name={}&album_name={}&duration={secs}", enc(&strip_versions(&q.title)), enc(&q.artist), enc(album));
+        if let Ok(Some(v)) = get(&url) {
+            hits.extend(serde_json::from_value::<Hit>(v).ok());
         }
     }
     Some(pick(&hits, q).unwrap_or_default())
 }
 
-/// The best record: timed lyrics with a matching length first. Untimed
-/// lyrics are fine from any version, timed ones only from the same length
-/// (another version's timing would be off).
+/// The best record of this song: timed lyrics with the closest length
+/// first. Untimed lyrics are fine from any version, timed ones only from
+/// about the same length (another version's timing would be off).
 fn pick(hits: &[Hit], q: &Query) -> Option<Found> {
-    let fits = |h: &&Hit| match (q.secs, h.duration) {
-        (Some(s), Some(d)) => (s as f64 - d).abs() <= q.slack,
-        _ => true,
+    let off = |h: &Hit| match (q.secs, h.duration) {
+        (Some(s), Some(d)) => (s as f64 - d).abs(),
+        _ => 0.0,
     };
     let has = |s: &Option<String>| s.as_deref().is_some_and(|t| !t.trim().is_empty());
-    if let Some(h) = hits.iter().filter(fits).find(|h| has(&h.synced_lyrics) || h.instrumental) {
+    let same: Vec<&Hit> = hits.iter().filter(|h| same_song(h, q)).collect();
+    let timed = same.iter().filter(|h| off(h) <= q.slack && (has(&h.synced_lyrics) || h.instrumental)).min_by(|a, b| off(a).total_cmp(&off(b)));
+    if let Some(h) = timed {
         return Some(Found { synced: h.synced_lyrics.clone().filter(|_| !h.instrumental), plain: h.plain_lyrics.clone(), instrumental: h.instrumental, at: 0 });
     }
-    hits.iter().find(|h| has(&h.plain_lyrics)).map(|h| Found { plain: h.plain_lyrics.clone(), ..Default::default() })
+    same.iter().find(|h| has(&h.plain_lyrics)).map(|h| Found { plain: h.plain_lyrics.clone(), ..Default::default() })
 }
 
 fn enc(s: &str) -> String {
@@ -192,7 +300,7 @@ fn query(t: &Track) -> Option<Query> {
         return None;
     }
     let secs = (t.duration_ms > 0).then(|| (t.duration_ms as f64 / 1000.0).round() as u64);
-    Some(Query { artist, title, album: t.album.clone().filter(|a| !a.trim().is_empty() && !yt), secs, slack: if yt { 12.0 } else { 4.0 } })
+    Some(Query { artist, title, album: t.album.clone().filter(|a| !a.trim().is_empty() && !yt), secs, slack: if yt { 12.0 } else { 5.0 } })
 }
 
 /// Drops "(Official Video)", "[Lyrics]", "| 4K" and the like.
@@ -239,21 +347,64 @@ mod tests {
     fn files_keep_their_tags() {
         let t = track("All Falls Down", "Kanye West", Source::File { path: "a.mp3".into() });
         let q = query(&t).unwrap();
-        assert_eq!(q, Query { artist: "Kanye West".into(), title: "All Falls Down".into(), album: Some("The College Dropout".into()), secs: Some(224), slack: 4.0 });
+        assert_eq!(q, Query { artist: "Kanye West".into(), title: "All Falls Down".into(), album: Some("The College Dropout".into()), secs: Some(224), slack: 5.0 });
     }
 
     #[test]
     fn timed_lyrics_need_the_same_length() {
-        let q = Query { artist: "a".into(), title: "b".into(), album: None, secs: Some(164), slack: 4.0 };
-        let hit = |d: f64, synced: bool| Hit { duration: Some(d), synced_lyrics: synced.then(|| "[00:01.00] x".into()), plain_lyrics: Some("x".into()), ..Default::default() };
-        let mut far = hit(234.0, true);
-        far.synced_lyrics = Some("[00:09.00] far".into());
-        let hits = [far.clone(), hit(165.0, true)];
-        assert_eq!(pick(&hits, &q).unwrap().synced.as_deref(), Some("[00:01.00] x"));
+        let q = Query { artist: "Kanye West".into(), title: "Coldest Winter".into(), album: None, secs: Some(164), slack: 4.0 };
+        let hit = |d: f64, lrc: &str| Hit { track_name: "Coldest Winter".into(), artist_name: "Kanye West".into(), duration: Some(d), synced_lyrics: Some(lrc.into()), plain_lyrics: Some("x".into()), ..Default::default() };
+        let far = hit(234.0, "[00:09.00] far");
+        let hits = [far.clone(), hit(167.0, "[00:01.00] near"), hit(165.0, "[00:01.00] nearest")];
+        assert_eq!(pick(&hits, &q).unwrap().synced.as_deref(), Some("[00:01.00] nearest"));
         // Only another length has timed lyrics: use its plain text.
         let f = pick(&[far], &q).unwrap();
         assert_eq!(f.synced, None);
         assert!(f.lyrics().is_some_and(|l| !l.synced));
+    }
+
+    #[test]
+    fn other_songs_from_the_fuzzy_search_are_skipped() {
+        let q = Query { artist: "Kanye West".into(), title: "Heartless".into(), album: None, secs: Some(211), slack: 5.0 };
+        let rec = |t: &str, a: &str| Hit { track_name: t.into(), artist_name: a.into(), duration: Some(211.0), synced_lyrics: Some("[00:01.00] x".into()), ..Default::default() };
+        assert!(!same_song(&rec("Heartless", "The Weeknd"), &q));
+        assert!(!same_song(&rec("Stronger", "Kanye West"), &q));
+        assert!(same_song(&rec("Heartless", "Kanye West"), &q));
+        assert!(same_song(&rec("Kanye West - Heartless", "Kanye West"), &q));
+        assert!(same_song(&rec("Heartless (Explicit)", "Kanye West, Kid Cudi"), &q));
+        let q = Query { artist: "JAY-Z, Kanye West".into(), title: "N****s In Paris".into(), album: None, secs: None, slack: 5.0 };
+        assert!(same_song(&rec("N****s in Paris", "Kanye West, Jay-Z"), &q));
+    }
+
+    #[test]
+    fn version_notes_are_dropped_for_searching() {
+        assert_eq!(strip_versions("Heartless - 2011 Remaster"), "Heartless");
+        assert_eq!(strip_versions("Heartless (Remastered) [Explicit]"), "Heartless");
+        assert_eq!(strip_versions("All Falls Down (feat. Syleena Johnson)"), "All Falls Down");
+        assert_eq!(strip_versions("Runaway feat. Pusha T"), "Runaway");
+        assert_eq!(strip_versions("Song - Radio Edit"), "Song");
+        assert_eq!(strip_versions("Love Lockdown (Interlude)"), "Love Lockdown (Interlude)");
+        assert_eq!(strip_versions("Kanye West - All Falls Down"), "Kanye West - All Falls Down");
+        assert_eq!(primary_artist("Kanye West, Syleena Johnson"), "Kanye West");
+        assert_eq!(primary_artist("Kanye West feat. Jay-Z"), "Kanye West");
+        assert_eq!(primary_artist("Simon & Garfunkel"), "Simon");
+        let s = searches(&Query { artist: "Kanye West; Kid Cudi".into(), title: "Heartless - 2011 Remaster".into(), album: None, secs: None, slack: 5.0 });
+        assert_eq!(s[0], "track_name=Heartless&artist_name=Kanye%20West%3B%20Kid%20Cudi");
+        assert_eq!(s[1], "track_name=Heartless&artist_name=Kanye%20West");
+    }
+
+    /// Live check against lrclib.net (not run by default):
+    /// STARLITE_LYRICS_CHECK="artist|title|secs~..." cargo test -- --ignored live
+    #[test]
+    #[ignore]
+    fn live_lookups() {
+        let list = std::env::var("STARLITE_LYRICS_CHECK").unwrap_or_default();
+        for item in list.split('~').filter(|s| !s.is_empty()) {
+            let f: Vec<&str> = item.split('|').collect();
+            let q = Query { artist: f[0].into(), title: f[1].into(), album: None, secs: f.get(2).and_then(|s| s.parse().ok()), slack: 5.0 };
+            let found = lookup(&q).map(|f| if f.synced.is_some() { "timed" } else if f.plain.is_some() { "plain" } else if f.instrumental { "instrumental" } else { "MISS" }).unwrap_or("network error");
+            println!("{found:>13}  {} - {}", q.artist, q.title);
+        }
     }
 
     #[test]

@@ -4,12 +4,14 @@
 
 use std::time::{Duration, Instant};
 
-use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, Vec2};
+use std::sync::Arc;
+
+use egui::{pos2, vec2, Align2, Color32, CursorIcon, FontId, Galley, Id, Rect, Sense, Ui, Vec2};
 
 use crate::app::Starlite;
 use crate::glass::El;
 use crate::icons::Icons;
-use crate::meta::Lyrics;
+use crate::meta::{Line, Lyrics};
 use crate::widgets::{cover, font, text_trunc};
 
 /// Average colours of the cover's four quadrants, saturated a bit: the
@@ -142,6 +144,8 @@ impl Starlite {
         // A little ahead, so the glide lands as the line is sung.
         let pos_ms = (pos * 1000.0) as u64 + 200;
         let current = if ly.synced { ly.lines.iter().rposition(|l| l.at_ms.is_some_and(|t| t <= pos_ms)) } else { None };
+        // Words light up nearly on time (just a hair early, like the eye reads).
+        let word_ms = pos * 1000.0 + 60.0;
         let now = Instant::now();
         let dt = dt.clamp(0.0, 0.05);
 
@@ -246,7 +250,13 @@ impl Starlite {
                     }
                 }
             }
-            p.galley_with_override_text_color(rect.min, g.clone(), c);
+            if Some(i) == current && !ly.lines[i].words.is_empty() {
+                // The line being sung: words light up as they're sung.
+                let g = sung_galley(ui, &ly.lines[i], word_ms, base, f.clone(), r.width(), edge * alpha);
+                p.galley(rect.min, g, c);
+            } else {
+                p.galley_with_override_text_color(rect.min, g.clone(), c);
+            }
         }
         if let Some(s) = seek_to {
             self.lyric_scroll.user = 0.0;
@@ -254,6 +264,53 @@ impl Starlite {
             self.seek_to(s);
         }
     }
+}
+
+/// How lit (0..1) each character of a timed line is at `t_ms`: sung words
+/// fully, the word being sung with a soft edge sweeping left to right.
+pub fn char_light(line: &Line, t_ms: f64) -> Vec<f32> {
+    const EDGE: f32 = 0.35;
+    let mut out = Vec::with_capacity(line.text.len());
+    let mut prev = 0.0;
+    for (b, _) in line.text.char_indices() {
+        let lit = match line.words.iter().find(|w| w.range.contains(&b)) {
+            Some(w) => {
+                let n = line.text[w.range.clone()].chars().count().max(1) as f32;
+                let k = line.text[w.range.start..b].chars().count() as f32;
+                let x = (k + 0.5) / n;
+                let p = ((t_ms - w.start_ms as f64) / (w.end_ms - w.start_ms).max(1) as f64).clamp(0.0, 1.0) as f32;
+                ((p * (1.0 + EDGE) - x) / EDGE).clamp(0.0, 1.0)
+            }
+            // Spaces between words follow the word before them.
+            None => prev,
+        };
+        out.push(lit);
+        prev = lit;
+    }
+    out
+}
+
+/// The current line laid out with each character's own brightness.
+fn sung_galley(ui: &Ui, line: &Line, t_ms: f64, base: f32, font: FontId, width: f32, mul: f32) -> Arc<Galley> {
+    use egui::text::{LayoutJob, LayoutSection, TextFormat};
+    // Not yet sung: as bright as the lines still to come.
+    let unlit = base.min(0.42);
+    let light = char_light(line, t_ms);
+    let mut job = LayoutJob { text: line.text.clone(), break_on_newline: true, ..Default::default() };
+    job.wrap.max_width = width;
+    let bounds: Vec<usize> = line.text.char_indices().map(|(b, _)| b).chain([line.text.len()]).collect();
+    let mut k = 0;
+    while k < light.len() {
+        // Merge runs of the same (rounded) brightness into one section.
+        let a = ((unlit + (base - unlit) * light[k]) * mul * 64.0).round() / 64.0;
+        let mut e = k + 1;
+        while e < light.len() && (((unlit + (base - unlit) * light[e]) * mul * 64.0).round() / 64.0 - a).abs() < 1e-4 {
+            e += 1;
+        }
+        job.sections.push(LayoutSection { leading_space: 0.0, byte_range: bounds[k]..bounds[e], format: TextFormat::simple(font.clone(), Color32::WHITE.gamma_multiply(a)) });
+        k = e;
+    }
+    ui.painter().layout_job(job)
 }
 
 /// Where the lyrics are scrolled to (per line, for the wave).
@@ -294,6 +351,18 @@ mod tests {
             prev = s;
         }
         assert!((s - 100.0).abs() < 0.5, "settled by 1.5 s: {s}");
+    }
+
+    #[test]
+    fn words_light_up_as_they_are_sung() {
+        let ly = crate::meta::parse("[00:00.00] <00:00.00>one <00:01.00>two <00:02.00>\n[00:03.00] x").unwrap();
+        let l = &ly.lines[0];
+        let at = |t| super::char_light(l, t);
+        assert!(at(0.0).iter().all(|&v| v == 0.0), "nothing sung yet");
+        let mid = at(1500.0);
+        assert!(mid[..3].iter().all(|&v| v == 1.0), "'one' sung: {mid:?}");
+        assert!(mid[4] > mid[6], "'two' lights left to right: {mid:?}");
+        assert!(at(2000.0).iter().all(|&v| v == 1.0), "all sung");
     }
 
     #[test]

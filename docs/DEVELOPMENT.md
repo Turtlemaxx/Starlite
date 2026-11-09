@@ -57,7 +57,10 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   online, on by default; only title, artist, album and length are sent, and
   results are cached in `lyrics-cache`), whose timed lyrics beat untimed tags.
   Timed lyrics glide along on per-line springs (lower lines a beat later), the
-  wheel lets you look around for 2.5 s, and clicking a line jumps there.
+  wheel lets you look around for 2.5 s, and clicking a line jumps there. In
+  the current line the words light up as they're sung (a soft sweep), timed
+  by word stamps (`<mm:ss.xx>`, enhanced LRC) when the lyrics have them, or
+  else spread over the line by word length.
   YouTube songs show their video instead of the cover.
 - **Mini player:** switch to another app (or minimize Starlite) while a song
   is loaded and a small card

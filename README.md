@@ -20,7 +20,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 ## Features
 
-**Full screen.** Big cover on a background made from the cover's colours. Lyrics show beside the cover and glide along with the song. They come from [lrclib.net](https://lrclib.net) (can be turned off in Settings → Lyrics), the file's tags or a `.lrc` next to it. Click a line to jump there.
+**Full screen.** Big cover on a background made from the cover's colours. Lyrics show beside the cover and glide along with the song, lighting up word by word. They come from [lrclib.net](https://lrclib.net) (can be turned off in Settings → Lyrics), the file's tags or a `.lrc` next to it. Click a line to jump there.
 
 <p align="center"><img src="docs/screenshots/fullscreen.png" width="720" alt="Full screen Now Playing"></p>
 

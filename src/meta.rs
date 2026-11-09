@@ -57,10 +57,98 @@ pub fn read(path: &Path) -> Meta {
 }
 
 /// One lyrics line; `at_ms` is set for synced (LRC) lyrics.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Line {
     pub at_ms: Option<u64>,
     pub text: String,
+    /// When each word is sung (timed lyrics only): from word stamps
+    /// ("<mm:ss.xx>", enhanced LRC) when the lyrics have them, otherwise
+    /// spread over the line by word length.
+    pub words: Vec<Word>,
+}
+
+/// A word (or a stamped run of text) in a line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Word {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    /// Byte range in the line's text.
+    pub range: std::ops::Range<usize>,
+}
+
+/// Splits a line with word stamps ("<00:12.50>word") into its text and the
+/// stamps' (time, byte offset in that text).
+fn word_stamps(rest: &str) -> (String, Vec<(u64, usize)>) {
+    let mut out = String::new();
+    let mut stamps = Vec::new();
+    let mut s = rest;
+    while let Some(open) = s.find('<') {
+        let Some(len) = s[open..].find('>') else { break };
+        match parse_stamp(&s[open + 1..open + len]) {
+            Some(ms) => {
+                out.push_str(&s[..open]);
+                stamps.push((ms, out.len()));
+            }
+            None => out.push_str(&s[..open + len + 1]),
+        }
+        s = &s[open + len + 1..];
+    }
+    out.push_str(s);
+    // Trim, keeping the offsets right.
+    let lead = out.len() - out.trim_start().len();
+    let text = out.trim().to_string();
+    let stamps = stamps.into_iter().map(|(ms, at)| (ms, at.saturating_sub(lead).min(text.len()))).collect();
+    (text, stamps)
+}
+
+/// Word timings for a line from `start` until `next` (the next line).
+fn line_words(text: &str, start: u64, next: Option<u64>, stamps: &[(u64, usize)]) -> Vec<Word> {
+    // Stamped: each run of text from one stamp to the next.
+    if !stamps.is_empty() {
+        let mut marks: Vec<(u64, usize)> = Vec::new();
+        if stamps[0].1 > 0 {
+            marks.push((start, 0));
+        }
+        marks.extend_from_slice(stamps);
+        let mut words = Vec::new();
+        for (k, &(ms, at)) in marks.iter().enumerate() {
+            let (end_ms, end_at) = marks.get(k + 1).map(|&(m, a)| (m, a)).unwrap_or((next.unwrap_or(ms + 800).max(ms), text.len()));
+            let seg = &text[at..end_at];
+            let a = at + (seg.len() - seg.trim_start().len());
+            let b = at + seg.trim_end().len();
+            if a < b {
+                words.push(Word { start_ms: ms, end_ms: end_ms.max(ms + 1), range: a..b });
+            }
+        }
+        return words;
+    }
+    // Unstamped: the singing takes most of the gap to the next line (but
+    // not ages, if a pause follows), each word by its length.
+    let chars = text.chars().count() as u64;
+    if chars == 0 {
+        return Vec::new();
+    }
+    let gap = next.map(|n| n.saturating_sub(start)).unwrap_or(4000);
+    let dur = (gap * 9 / 10).min(chars * 95 + 300).max(300);
+    let mut spans = Vec::new();
+    let mut i = 0;
+    for w in text.split_whitespace() {
+        let a = text[i..].find(w).map(|o| i + o).unwrap_or(i);
+        spans.push(a..a + w.len());
+        i = a + w.len();
+    }
+    let weight = |r: &std::ops::Range<usize>| text[r.clone()].chars().count() as u64 + 1;
+    let total: u64 = spans.iter().map(weight).sum::<u64>().max(1);
+    let mut t = 0u64;
+    spans
+        .into_iter()
+        .map(|r| {
+            let w = weight(&r);
+            let word = Word { start_ms: start + dur * t / total, end_ms: start + dur * (t + w) / total, range: r };
+            t += w;
+            word
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,7 +180,7 @@ pub fn lyrics(path: &Path) -> Option<Lyrics> {
 
 /// Parse LRC (timestamped) or plain lyrics text.
 pub fn parse(text: &str) -> Option<Lyrics> {
-    let mut timed: Vec<Line> = Vec::new();
+    let mut timed: Vec<(Line, Vec<(u64, usize)>)> = Vec::new();
     let mut plain: Vec<Line> = Vec::new();
     for raw in text.lines() {
         let mut rest = raw.trim();
@@ -113,17 +201,29 @@ pub fn parse(text: &str) -> Option<Lyrics> {
         }
         if stamps.is_empty() {
             if !raw.trim().starts_with('[') {
-                plain.push(Line { at_ms: None, text: raw.trim().to_string() });
+                plain.push(Line { at_ms: None, text: raw.trim().to_string(), words: Vec::new() });
             }
         } else {
+            let (text, word_marks) = word_stamps(rest);
             for ms in stamps {
-                timed.push(Line { at_ms: Some(ms), text: rest.to_string() });
+                timed.push((Line { at_ms: Some(ms), text: text.clone(), words: Vec::new() }, word_marks.clone()));
             }
         }
     }
     if !timed.is_empty() {
-        timed.sort_by_key(|l| l.at_ms);
-        return Some(Lyrics { lines: timed, synced: true });
+        timed.sort_by_key(|l| l.0.at_ms);
+        let starts: Vec<u64> = timed.iter().map(|l| l.0.at_ms.unwrap_or(0)).collect();
+        let lines = timed
+            .into_iter()
+            .enumerate()
+            .map(|(i, (mut l, marks))| {
+                // A repeated line (several stamps) only keeps word stamps for its first time.
+                let marks: Vec<(u64, usize)> = if marks.first().is_some_and(|m| m.0 + 1000 < starts[i]) { Vec::new() } else { marks };
+                l.words = line_words(&l.text, starts[i], starts.get(i + 1).copied(), &marks);
+                l
+            })
+            .collect();
+        return Some(Lyrics { lines, synced: true });
     }
     // Trim blank lines at the ends of plain lyrics.
     while plain.first().is_some_and(|l| l.text.is_empty()) {
@@ -156,4 +256,45 @@ fn parse_stamp(s: &str) -> Option<u64> {
         }
     };
     Some(m * 60_000 + sec * 1000 + frac_ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn words(l: &Line) -> Vec<(&str, u64, u64)> {
+        l.words.iter().map(|w| (&l.text[w.range.clone()], w.start_ms, w.end_ms)).collect()
+    }
+
+    #[test]
+    fn word_stamps_are_used() {
+        let ly = parse("[00:10.00] <00:10.00>Oh, <00:10.50>when it <00:11.20>all <00:12.00>\n[00:14.00] next").unwrap();
+        let l = &ly.lines[0];
+        assert_eq!(l.text, "Oh, when it all");
+        assert_eq!(words(l), vec![("Oh,", 10_000, 10_500), ("when it", 10_500, 11_200), ("all", 11_200, 12_000)]);
+    }
+
+    #[test]
+    fn unstamped_words_are_spread_by_length() {
+        let ly = parse("[00:01.00] I'm telling you all\n[00:05.00] next").unwrap();
+        let w = words(&ly.lines[0]);
+        assert_eq!(w.iter().map(|w| w.0).collect::<Vec<_>>(), ["I'm", "telling", "you", "all"]);
+        assert_eq!(w[0].1, 1000, "first word starts with the line");
+        assert!(w.windows(2).all(|p| p[0].2 == p[1].1), "back to back: {w:?}");
+        assert!(w[3].2 <= 4600, "done before the next line: {w:?}");
+        assert!(w[1].2 - w[1].1 > w[2].2 - w[2].1, "longer word, longer time");
+    }
+
+    #[test]
+    fn long_pause_after_a_line_is_not_stretched() {
+        let ly = parse("[00:00.00] short line\n[00:30.00] next").unwrap();
+        assert!(ly.lines[0].words.last().unwrap().end_ms < 3000);
+    }
+
+    #[test]
+    fn empty_and_plain_lines_have_no_words() {
+        let ly = parse("[00:01.00] \n[00:02.00] la").unwrap();
+        assert!(ly.lines[0].words.is_empty());
+        assert!(parse("just text").unwrap().lines[0].words.is_empty());
+    }
 }
