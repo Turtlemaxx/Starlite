@@ -654,8 +654,8 @@ impl Starlite {
             let vol = self.player.effective_volume();
             els.push(El::rect(vt, ppp, 2.0 * k, 1.0, 0.0, Kind::Track, 0.0, 0.0).with_value(vol));
             if live && (vresp.hovered() || vresp.dragged()) {
-                let kn = Rect::from_center_size(pos2(vt.left() + vt.width() * vol, cy), vec2(20.0 * k, 13.0 * k));
-                els.push(El::rect(kn, ppp, 6.5 * k, 1.0, 2.0, Kind::Lens, 0.0, 0.0).with_value(1.0));
+                let kn = Rect::from_center_size(pos2(vt.left() + vt.width() * vol, cy), vec2(14.0 * k, 9.0 * k));
+                els.push(El::rect(kn, ppp, 4.5 * k, 1.0, 2.0, Kind::Lens, 0.0, 0.0).with_value(1.0));
             }
             if (vol - before).abs() > 1e-4 {
                 actions.push(Action::Volume(vol));

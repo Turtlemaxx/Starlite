@@ -202,12 +202,15 @@ fn build_activity<'a>(prefs: &DiscordPrefs, p: &Presence, cover: Option<String>)
     if !p.playing {
         details = format!("{details} (paused)");
     }
+    // The short line under your name in Discord's member list: the artist,
+    // or "Starlite" when the artist is hidden or unknown.
+    let show_artist = prefs.show_artist && !p.artist.is_empty();
     let mut act = Activity::new()
         .activity_type(ActivityType::Listening)
-        .status_display_type(if prefs.show_title { StatusDisplayType::Details } else { StatusDisplayType::Name })
+        .status_display_type(if show_artist { StatusDisplayType::State } else { StatusDisplayType::Name })
         .details(details)
         .assets(Assets::new().large_image(image).large_text(hover));
-    if prefs.show_artist && !p.artist.is_empty() {
+    if show_artist {
         act = act.state(p.artist.clone());
     }
     if prefs.show_time {
@@ -345,6 +348,15 @@ mod tests {
         assert_eq!(v["assets"]["large_text"], "The College Dropout");
         assert_eq!(v["timestamps"]["start"], 1_000);
         assert_eq!(v["timestamps"]["end"], 224_000);
+        assert_eq!(v["status_display_type"], 1, "member list shows the artist (state)");
+    }
+
+    #[test]
+    fn member_list_falls_back_to_starlite_without_artist() {
+        let prefs = DiscordPrefs { show_artist: false, ..Default::default() };
+        assert_eq!(json(&prefs, &song(), None)["status_display_type"], 0, "app name");
+        let p = Presence { artist: String::new(), ..song() };
+        assert_eq!(json(&DiscordPrefs::default(), &p, None)["status_display_type"], 0, "unknown artist");
     }
 
     #[test]
