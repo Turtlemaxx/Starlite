@@ -1,0 +1,11 @@
+<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="trail" x1="0" y1="1" x2="1" y2="0"><stop offset="0.2" stop-color="#000000" stop-opacity="0.95"/><stop offset="0.6" stop-color="#000000" stop-opacity="0.3"/><stop offset="1" stop-color="#000000" stop-opacity="0"/></linearGradient>
+    <linearGradient id="streak" x1="0" y1="1" x2="1" y2="0"><stop offset="0" stop-color="#000000" stop-opacity="0.6"/><stop offset="1" stop-color="#000000" stop-opacity="0"/></linearGradient>
+  </defs>
+  <g id="Shooting Star" transform="translate(512 512) scale(1.1) translate(-552 -490)">
+    <path id="Trail" d="M990 90 L350.3 457.9 L549.7 682.1 Z" fill="url(#trail)"/>
+    <path id="Streak" d="M900 330 L473.3 600.0 L486.7 620.0 Z" fill="url(#streak)"/>
+    <path id="Star" transform="rotate(-12 450 570)" d="M450.0 250.0 L553.5 427.6 L754.3 471.1 L617.4 624.4 L638.1 828.9 L450.0 746.0 L261.9 828.9 L282.6 624.4 L145.7 471.1 L346.5 427.6 Z" fill="#000000" stroke="#000000" stroke-width="36" stroke-linejoin="round"/>
+  </g>
+</svg>
