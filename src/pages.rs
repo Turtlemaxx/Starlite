@@ -508,7 +508,7 @@ impl Starlite {
         p.text(pos2(x0, 30.0), Align2::LEFT_TOP, "Settings", font(30.0, "bold"), theme.text());
 
         // Tabs: one glass strip with a glass highlight that slides between them.
-        const TABS: [&str; 4] = ["Appearance", "YouTube", "Mini player", "Discord"];
+        const TABS: [&str; 5] = ["Appearance", "YouTube", "Mini player", "Lyrics", "Discord"];
         let f = font(13.5, "semibold");
         let widths: Vec<f32> = TABS.iter().map(|t| p.layout_no_wrap(t.to_string(), f.clone(), theme.text()).size().x + 34.0).collect();
         let strip = Rect::from_min_size(pos2(x0, 88.0), vec2(widths.iter().sum::<f32>() + 8.0, 40.0));
@@ -602,6 +602,16 @@ impl Starlite {
                             self.mini.prefs.save();
                         }
                     }
+                }
+            }
+            3 => {
+                // Lyrics: look them up online or only use the song's own.
+                let mut on = self.lprefs.online;
+                if toggle_row(ui, Rect::from_min_size(pos2(x0, top), vec2(content.width().min(520.0), 52.0)), Id::new("lyrics_online"), "Find lyrics online", Some("Gets timed lyrics for the song you're playing from lrclib.net"), &mut on, theme) {
+                    self.sound.click();
+                    self.lprefs.online = on;
+                    self.lprefs.save();
+                    self.load_lyrics(&ctx);
                 }
             }
             _ => self.discord_settings(ui, icons, els, ppp, x0, top, content),

@@ -20,7 +20,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 ## Features
 
-**Full screen.** Big cover on a background made from the cover's colours. Songs with lyrics (in the file's tags or a `.lrc` next to it) show them beside the cover, following along with the song. Click a line to jump there.
+**Full screen.** Big cover on a background made from the cover's colours. Lyrics show beside the cover and glide along with the song. They come from [lrclib.net](https://lrclib.net) (can be turned off in Settings → Lyrics), the file's tags or a `.lrc` next to it. Click a line to jump there.
 
 <p align="center"><img src="docs/screenshots/fullscreen.png" width="720" alt="Full screen Now Playing"></p>
 
@@ -40,7 +40,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 ## Install
 
-1. Download `Starlite-0.1.3-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
+1. Download `Starlite-0.1.4-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
 2. Unzip it anywhere and run `Starlite.exe`.
 
 Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, which Windows 11 already has.

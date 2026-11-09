@@ -7,6 +7,7 @@ mod glass;
 mod icons;
 mod library;
 mod logo;
+mod lyrics;
 mod meta;
 mod mini;
 mod navidrome;

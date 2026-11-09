@@ -84,7 +84,7 @@ pub fn strip_cover_token(uri: &str) -> Option<String> {
     Some(format!("{COVER_SCHEME}{id}"))
 }
 
-fn md5_hex(s: &str) -> String {
+pub fn md5_hex(s: &str) -> String {
     Md5::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
 

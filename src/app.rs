@@ -146,7 +146,8 @@ pub struct Starlite {
     pub fs_t: f32,
     /// Lyrics for the current song (track id, lyrics if it has any).
     pub lyrics: Option<(String, Option<Lyrics>)>,
-    pub lyric_scroll: f32,
+    pub lyric_scroll: crate::nowplaying::LyricScroll,
+    pub lprefs: crate::lyrics::LyricsPrefs,
     /// Album palette for the fullscreen background (eased towards the target).
     pub palette: [[f32; 3]; 4],
     palette_target: [[f32; 3]; 4],
@@ -326,14 +327,15 @@ impl Starlite {
             fullscreen: false,
             fs_t: 0.0,
             lyrics: None,
-            lyric_scroll: 0.0,
+            lyric_scroll: Default::default(),
+            lprefs: crate::lyrics::LyricsPrefs::load(),
             palette: DEFAULT_PALETTE,
             palette_target: DEFAULT_PALETTE,
             palette_for: None,
             yt: Arc::new(YouTube::new()),
             nd: Arc::new(crate::navidrome::Navidrome::load()),
             ndst: NdState::default(),
-            // Debug: STARLITE_SETTINGS_TAB=0..3 opens that Settings tab.
+            // Debug: STARLITE_SETTINGS_TAB=0..4 opens that Settings tab.
             settings_tab: std::env::var("STARLITE_SETTINGS_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             discord: crate::discord::Discord::start(),
             dc_id_input: crate::discord::DiscordPrefs::load().app_id,
@@ -531,7 +533,7 @@ impl Starlite {
                 Job::Lyrics(id, ly) => {
                     if self.now.as_ref().is_some_and(|t| t.id == id) {
                         self.lyrics = Some((id, ly));
-                        self.lyric_scroll = 0.0;
+                        self.lyric_scroll = Default::default();
                     }
                 }
                 Job::YtSignIn(r) => {
@@ -649,22 +651,47 @@ impl Starlite {
         }
     }
 
-    /// New song: fetch its cover colours and (for files) its lyrics.
+    /// New song: fetch its cover colours and its lyrics.
     fn on_track_changed(&mut self, ctx: &egui::Context) {
         let Some(t) = self.now.clone() else { return };
         self.palette_for = Some(t.id.clone());
-        self.lyrics = None;
-        self.lyric_scroll = 0.0;
         let (tx, c) = (self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             let pal = t.artwork.as_deref().and_then(crate::nowplaying::cover_bytes).and_then(|b| crate::nowplaying::palette_from(&b));
             let _ = tx.send(Job::Palette(t.id.clone(), pal));
-            if let Source::File { path } = &t.source {
-                let _ = tx.send(Job::Lyrics(t.id.clone(), crate::meta::lyrics(path)));
-            } else {
-                let _ = tx.send(Job::Lyrics(t.id.clone(), None));
-            }
             c.request_repaint();
+        });
+        self.load_lyrics(ctx);
+    }
+
+    /// Lyrics for the current song: a `.lrc` file or timed tags win; then
+    /// lrclib.net (when on), whose timed lyrics beat untimed tags.
+    pub fn load_lyrics(&mut self, ctx: &egui::Context) {
+        let Some(t) = self.now.clone() else { return };
+        self.lyrics = None;
+        self.lyric_scroll = Default::default();
+        let online = self.lprefs.online;
+        let (tx, c) = (self.jobs_tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let send = |l: Option<Lyrics>| {
+                let _ = tx.send(Job::Lyrics(t.id.clone(), l));
+                c.request_repaint();
+            };
+            let local = match &t.source {
+                Source::File { path } => crate::meta::lyrics(path),
+                _ => None,
+            };
+            if local.as_ref().is_some_and(|l| l.synced) || !online {
+                return send(local);
+            }
+            if local.is_some() {
+                send(local.clone());
+            }
+            match crate::lyrics::online(&t) {
+                Some(l) if l.synced || local.is_none() => send(Some(l)),
+                _ if local.is_none() => send(None),
+                _ => {}
+            }
         });
     }
 

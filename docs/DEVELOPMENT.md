@@ -52,9 +52,13 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   time.
 - **Full screen** (the ⤢ button on the right of the bar, Esc to leave): big
   cover with title, artist and album, lyrics on the side, and a background
-  made from the cover's colours. Lyrics come from the song's tags or a `.lrc`
-  file with the same name. Timed (LRC) lyrics follow the song, and clicking a
-  line jumps there. YouTube songs show their video instead of the cover.
+  made from the cover's colours. Lyrics: a `.lrc` file with the same name or
+  timed tags win; otherwise lrclib.net (Settings → Lyrics → Find lyrics
+  online, on by default; only title, artist, album and length are sent, and
+  results are cached in `lyrics-cache`), whose timed lyrics beat untimed tags.
+  Timed lyrics glide along on per-line springs (lower lines a beat later), the
+  wheel lets you look around for 2.5 s, and clicking a line jumps there.
+  YouTube songs show their video instead of the cover.
 - **Mini player:** switch to another app (or minimize Starlite) while a song
   is loaded and a small card
   slides out of the right edge of the screen, showing the album cover with
@@ -117,6 +121,7 @@ they stay sharp at any size and mid-animation.
 | `src/mini.rs` | mini player card shown while you're in another app |
 | `src/navidrome.rs` | Navidrome / Subsonic API client |
 | `src/meta.rs` | tags, cover art and lyrics from audio files |
+| `src/lyrics.rs` | lyrics lookup on lrclib.net, cache |
 | `src/audio.rs` | playback engine (rodio) |
 | `src/youtube.rs` | YouTube Data API client (Google sign-in / API key) |
 | `src/ytplayer.rs` | YouTube's embedded player in a WebView2 card |

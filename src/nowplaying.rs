@@ -2,6 +2,8 @@
 //! follow the song when they're timed (LRC). The background is drawn by the
 //! shader from the cover's colours (see `glass.rs::album_bg`).
 
+use std::time::{Duration, Instant};
+
 use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui, Vec2};
 
 use crate::app::Starlite;
@@ -115,7 +117,13 @@ impl Starlite {
             text_trunc(&p, pos2(art.center().x, text_top + 62.0), Align2::CENTER_CENTER, album, font(13.5, "regular"), faint, tw);
         }
         if !two_col && !is_video {
-            let note = if self.lyrics.as_ref().is_some_and(|(id, _)| *id == track.id) { "No lyrics in this song's tags" } else { "" };
+            let looked = self.lyrics.as_ref().is_some_and(|(id, _)| *id == track.id);
+            let note = match (looked, self.lprefs.online) {
+                (true, true) => "No lyrics found",
+                (true, false) => "No lyrics in this song's tags",
+                (false, true) => "Looking for lyrics…",
+                (false, false) => "",
+            };
             if !note.is_empty() {
                 p.text(pos2(art.center().x, text_top + 92.0), Align2::CENTER_CENTER, note, font(12.5, "regular"), faint);
             }
@@ -131,8 +139,11 @@ impl Starlite {
 
     fn draw_lyrics(&mut self, ui: &mut Ui, r: Rect, ly: &Lyrics, dt: f32, alpha: f32, animating: &mut bool) {
         let (pos, _) = self.playback_position();
-        let pos_ms = (pos * 1000.0) as u64 + 150;
+        // A little ahead, so the glide lands as the line is sung.
+        let pos_ms = (pos * 1000.0) as u64 + 200;
         let current = if ly.synced { ly.lines.iter().rposition(|l| l.at_ms.is_some_and(|t| t <= pos_ms)) } else { None };
+        let now = Instant::now();
+        let dt = dt.clamp(0.0, 0.05);
 
         // Lay out every line (wrapped) to know heights.
         let f = font(27.0, "bold");
@@ -153,24 +164,57 @@ impl Starlite {
         }
         let total = y;
 
-        // Synced: keep the current line at ~40% height. Plain: wheel scrolls.
-        if ly.synced {
-            let anchor = r.height() * 0.40;
-            let target = current.map(|i| tops[i] + galleys[i].size().y * 0.5 - anchor).unwrap_or(-anchor + 20.0);
-            self.lyric_scroll += (target - self.lyric_scroll) * (dt * 7.0).min(1.0);
-            if (target - self.lyric_scroll).abs() > 0.5 {
+        // Synced: the current line sits at ~38% height; each line glides there
+        // on its own spring, the ones further down a beat later, so the text
+        // flows up like a wave. The wheel lets you look around for a moment.
+        // Plain: the wheel scrolls.
+        let st = &mut self.lyric_scroll;
+        if st.lines.len() != galleys.len() {
+            st.lines = vec![(f32::NAN, 0.0); galleys.len()];
+        }
+        let wheel = if ui.rect_contains_pointer(r) { ui.ctx().input(|i| i.smooth_scroll_delta.y) } else { 0.0 };
+        let target = if ly.synced {
+            let anchor = r.height() * 0.38;
+            let base = current.map(|i| tops[i] + galleys[i].size().y * 0.5 - anchor).unwrap_or(-anchor + 20.0);
+            if wheel != 0.0 {
+                st.user -= wheel;
+                st.user_until = Some(now + Duration::from_millis(2500));
+            }
+            if st.user_until.is_some_and(|t| now >= t) {
+                st.user = 0.0;
+                st.user_until = None;
+            }
+            st.user = st.user.clamp(-anchor - base, (total - anchor - base).max(-anchor - base));
+            base + st.user
+        } else {
+            st.plain = (st.plain - wheel).clamp(0.0, (total - r.height() * 0.6).max(0.0));
+            st.plain
+        };
+        let browsing = st.user_until.is_some();
+        let c = current.unwrap_or(0);
+        for (i, (s, v)) in st.lines.iter_mut().enumerate() {
+            if !ly.synced || browsing || s.is_nan() || (*s - target).abs() > r.height() * 1.5 {
+                // Plain lyrics, the wheel (already smooth), a fresh song or a seek far away: no glide.
+                *s = target;
+                *v = 0.0;
+                continue;
+            }
+            let lag = i.saturating_sub(c).min(7) as f32;
+            *s = smooth_damp(*s, target, v, 0.34 + 0.045 * lag, dt);
+            if (*s - target).abs() < 0.2 && v.abs() < 1.0 {
+                *s = target;
+                *v = 0.0;
+            } else {
                 *animating = true;
             }
-        } else if ui.rect_contains_pointer(r) {
-            let d = ui.ctx().input(|i| i.smooth_scroll_delta.y);
-            self.lyric_scroll = (self.lyric_scroll - d).clamp(0.0, (total - r.height() * 0.6).max(0.0));
         }
+        let shown: Vec<f32> = st.lines.iter().map(|l| l.0).collect();
 
         let p = ui.painter().with_clip_rect(r);
-        let fade = 70.0;
+        let fade = 90.0;
         let mut seek_to = None;
         for (i, g) in galleys.iter().enumerate() {
-            let top = r.top() + tops[i] - self.lyric_scroll;
+            let top = r.top() + tops[i] - shown[i];
             let h = g.size().y;
             if top + h < r.top() || top > r.bottom() {
                 continue;
@@ -179,12 +223,14 @@ impl Starlite {
                 0.9
             } else if Some(i) == current {
                 1.0
+            } else if browsing {
+                0.6
             } else if current.is_some_and(|c| i < c) {
-                0.32
+                0.3
             } else {
-                0.45
+                0.42
             };
-            let base = ui.ctx().animate_value_with_time(Id::new(("lyric_a", i)), target, 0.25);
+            let base = ui.ctx().animate_value_with_time(Id::new(("lyric_a", i)), target, 0.35);
             if (base - target).abs() > 0.002 {
                 *animating = true;
             }
@@ -203,7 +249,60 @@ impl Starlite {
             p.galley_with_override_text_color(rect.min, g.clone(), c);
         }
         if let Some(s) = seek_to {
+            self.lyric_scroll.user = 0.0;
+            self.lyric_scroll.user_until = None;
             self.seek_to(s);
         }
+    }
+}
+
+/// Where the lyrics are scrolled to (per line, for the wave).
+#[derive(Default)]
+pub struct LyricScroll {
+    /// Each line's shown scroll and its velocity.
+    lines: Vec<(f32, f32)>,
+    /// Wheel offset while you look around timed lyrics, until `user_until`.
+    user: f32,
+    user_until: Option<Instant>,
+    /// Scroll of untimed lyrics.
+    plain: f32,
+}
+
+/// Critically damped spring towards `target` (eases in and out, no
+/// overshoot); `smooth` is roughly the time to get there.
+fn smooth_damp(cur: f32, target: f32, vel: &mut f32, smooth: f32, dt: f32) -> f32 {
+    let omega = 2.0 / smooth.max(1e-4);
+    let x = omega * dt;
+    let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);
+    let change = cur - target;
+    let temp = (*vel + omega * change) * dt;
+    *vel = (*vel - omega * temp) * exp;
+    target + (change + temp) * exp
+}
+
+#[cfg(test)]
+mod tests {
+    use super::smooth_damp;
+
+    #[test]
+    fn glide_settles_without_overshoot() {
+        let (mut s, mut v) = (0.0f32, 0.0f32);
+        let mut prev = s;
+        for frame in 0..90 {
+            s = smooth_damp(s, 100.0, &mut v, 0.34, 1.0 / 60.0);
+            assert!(s >= prev && s <= 100.0 + 1e-3, "frame {frame}: {s}");
+            prev = s;
+        }
+        assert!((s - 100.0).abs() < 0.5, "settled by 1.5 s: {s}");
+    }
+
+    #[test]
+    fn lower_lines_lag_behind() {
+        let (mut a, mut va, mut b, mut vb) = (0.0f32, 0.0, 0.0f32, 0.0);
+        for _ in 0..12 {
+            a = smooth_damp(a, 100.0, &mut va, 0.34, 1.0 / 60.0);
+            b = smooth_damp(b, 100.0, &mut vb, 0.34 + 0.045 * 3.0, 1.0 / 60.0);
+        }
+        assert!(a > b + 5.0, "{a} vs {b}");
     }
 }
