@@ -34,11 +34,15 @@ fn file() -> std::path::PathBuf {
     crate::library::data_dir().join("navidrome.json")
 }
 
-/// "music.example.com/app/#/album" → "https://music.example.com".
+/// "music.example.com/app/#/album" → "https://music.example.com". Without
+/// a scheme, home-network addresses get http (Navidrome's default) and
+/// everything else https, so the login token isn't sent unencrypted.
 fn normalize(url: &str) -> String {
     let mut u = url.trim().to_string();
     if !u.contains("://") {
-        u = format!("http://{u}");
+        let host = u.split(['/', ':', '#']).next().unwrap_or("").to_lowercase();
+        let scheme = if is_local_host(&host) { "http" } else { "https" };
+        u = format!("{scheme}://{u}");
     }
     if let Some(i) = u.find("/app") {
         u.truncate(i);
@@ -47,6 +51,37 @@ fn normalize(url: &str) -> String {
         u.truncate(i);
     }
     u.trim_end_matches('/').to_string()
+}
+
+fn is_local_host(host: &str) -> bool {
+    if let Ok(ip) = host.parse::<std::net::Ipv4Addr>() {
+        return ip.is_private() || ip.is_loopback() || ip.is_link_local();
+    }
+    host == "localhost" || host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".home") || !host.contains('.')
+}
+
+/// Covers are stored as `navidrome-cover:<id>`; the login is only added
+/// when one is shown, so no token ends up in the saved library.
+pub const COVER_SCHEME: &str = "navidrome-cover:";
+
+/// The current login, for turning cover ids into links.
+static ACTIVE: Mutex<Option<Conn>> = Mutex::new(None);
+
+/// The link for a `navidrome-cover:` id (None when not connected).
+pub fn resolve_cover(uri: &str) -> Option<String> {
+    let id = uri.strip_prefix(COVER_SCHEME)?;
+    let c = ACTIVE.lock().unwrap().clone()?;
+    Some(Navidrome::cover_url(&c, id))
+}
+
+/// Old saved links that still carry a token → `navidrome-cover:<id>`.
+pub fn strip_cover_token(uri: &str) -> Option<String> {
+    if !uri.contains("/rest/getCoverArt.view?") {
+        return None;
+    }
+    let q = uri.split('?').nth(1)?;
+    let id = q.split('&').find_map(|kv| kv.strip_prefix("id="))?;
+    Some(format!("{COVER_SCHEME}{id}"))
 }
 
 fn md5_hex(s: &str) -> String {
@@ -64,7 +99,8 @@ const NATIVE: [&str; 9] = ["mp3", "flac", "wav", "ogg", "oga", "m4a", "mp4", "aa
 
 impl Navidrome {
     pub fn load() -> Self {
-        let conn = std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok());
+        let conn: Option<Conn> = std::fs::read_to_string(file()).ok().and_then(|s| serde_json::from_str(&s).ok());
+        *ACTIVE.lock().unwrap() = conn.clone();
         Self {
             conn: Mutex::new(conn),
             agent: ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(8)).timeout_read(Duration::from_secs(30)).build(),
@@ -121,12 +157,14 @@ impl Navidrome {
             }
             let _ = std::fs::write(f, s);
         }
+        *ACTIVE.lock().unwrap() = Some(c.clone());
         *self.conn.lock().unwrap() = Some(c);
         Ok(())
     }
 
     pub fn disconnect(&self) {
         *self.conn.lock().unwrap() = None;
+        *ACTIVE.lock().unwrap() = None;
         let _ = std::fs::remove_file(file());
     }
 
@@ -148,7 +186,7 @@ impl Navidrome {
                 Some(RemotePlaylist {
                     title: p["name"].as_str().unwrap_or("Playlist").to_string(),
                     artist: p["owner"].as_str().unwrap_or_default().to_string(),
-                    artwork: p["coverArt"].as_str().map(|a| Self::cover_url(&c, a)),
+                    artwork: p["coverArt"].as_str().map(|a| format!("{COVER_SCHEME}{a}")),
                     permalink: None,
                     track_count: p["songCount"].as_u64().unwrap_or(0),
                     id,
@@ -173,7 +211,7 @@ impl Navidrome {
                     title: e["title"].as_str().unwrap_or("Unknown").to_string(),
                     artist: e["artist"].as_str().unwrap_or("Unknown artist").to_string(),
                     album: e["album"].as_str().map(String::from),
-                    artwork: e["coverArt"].as_str().map(|a| Self::cover_url(&c, a)),
+                    artwork: e["coverArt"].as_str().map(|a| format!("{COVER_SCHEME}{a}")),
                     permalink: None,
                     duration_ms: e["duration"].as_u64().unwrap_or(0) * 1000,
                     source: Source::Navidrome { song_id: sid, suffix: e["suffix"].as_str().unwrap_or("").to_lowercase() },
@@ -196,9 +234,21 @@ mod tests {
 
     #[test]
     fn normalizes_urls() {
-        assert_eq!(normalize("music.example.com/app/#/album"), "http://music.example.com");
+        assert_eq!(normalize("music.example.com/app/#/album"), "https://music.example.com");
+        assert_eq!(normalize("192.168.1.10:4533"), "http://192.168.1.10:4533");
+        assert_eq!(normalize("localhost:4533/app/"), "http://localhost:4533");
+        assert_eq!(normalize("nas.local:4533"), "http://nas.local:4533");
         assert_eq!(normalize(" https://nd.home:4533/ "), "https://nd.home:4533");
         assert_eq!(normalize("http://10.0.0.5:4533/app/"), "http://10.0.0.5:4533");
+    }
+
+    #[test]
+    fn saved_covers_carry_no_token() {
+        let old = "https://nd.example/rest/getCoverArt.view?id=al-7&size=400&u=me&t=abc123&s=salt&v=1.16.1&c=Starlite&f=json";
+        let new = strip_cover_token(old).unwrap();
+        assert_eq!(new, "navidrome-cover:al-7");
+        assert!(!new.contains("abc123"));
+        assert_eq!(strip_cover_token("https://i.ytimg.com/vi/x/hqdefault.jpg"), None);
     }
 
     #[test]

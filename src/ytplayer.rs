@@ -121,8 +121,11 @@ impl YtPlayer {
                 }
             })
             // Links inside the player (YouTube logo, title) open in the real browser.
+            // Only https links: anything else (file:, other protocols) is ignored.
             .with_new_window_req_handler(|url, _features| {
-                let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+                if url.starts_with("https://") && !url.contains(char::is_whitespace) {
+                    let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+                }
                 wry::NewWindowResponse::Deny
             })
             .build_as_child(&parent)

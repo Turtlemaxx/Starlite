@@ -40,7 +40,13 @@ fn placeholder(ui: &Ui, icons: &mut Icons, rect: Rect, radius: f32, icon: &'stat
 /// Cover art from a URL (http(s) or file://) with rounded corners; shows a
 /// placeholder icon while loading or if it fails.
 pub fn cover(ui: &Ui, icons: &mut Icons, rect: Rect, uri: Option<&str>, radius: f32, fallback: &'static str, theme: Theme) {
-    if let Some(uri) = uri {
+    // Navidrome covers are stored without the login; add it only here.
+    let resolved = uri.filter(|u| u.starts_with(crate::navidrome::COVER_SCHEME)).map(crate::navidrome::resolve_cover);
+    let uri = match resolved {
+        Some(r) => r.as_deref().map(|s| s.to_string()),
+        None => uri.map(String::from),
+    };
+    if let Some(uri) = uri.as_deref() {
         let poll = ui.ctx().try_load_texture(uri, TextureOptions::LINEAR, SizeHint::Scale(1.0.into()));
         if let Ok(TexturePoll::Ready { texture }) = poll {
             let uv = cover_uv(uri, texture.size, rect.size());

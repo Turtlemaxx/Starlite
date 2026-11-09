@@ -158,6 +158,19 @@ impl Library {
             });
         }
         lib.playlists.retain(|p| p.id != DOWNLOADED_ID);
+        // Navidrome covers saved by 0.1.0 still carried the login token.
+        let mut cleaned = false;
+        for p in &mut lib.playlists {
+            for t in &mut p.tracks {
+                if let Some(clean) = t.artwork.as_deref().and_then(crate::navidrome::strip_cover_token) {
+                    t.artwork = Some(clean);
+                    cleaned = true;
+                }
+            }
+        }
+        if cleaned {
+            lib.save();
+        }
         // Refresh local songs from their real tags (titles, covers can change).
         for p in &mut lib.playlists {
             for t in &mut p.tracks {

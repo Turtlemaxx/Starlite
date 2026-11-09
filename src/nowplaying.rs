@@ -56,6 +56,11 @@ pub fn palette_from(bytes: &[u8]) -> Option<[[f32; 3]; 4]> {
 
 /// Bytes of a cover URI (file:// or http(s)://).
 pub fn cover_bytes(uri: &str) -> Option<Vec<u8>> {
+    let resolved = crate::navidrome::resolve_cover(uri);
+    let uri = resolved.as_deref().unwrap_or(uri);
+    if uri.starts_with(crate::navidrome::COVER_SCHEME) {
+        return None;
+    }
     if let Some(path) = uri.strip_prefix("file://") {
         return std::fs::read(path).ok();
     }
