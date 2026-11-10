@@ -8,10 +8,10 @@
 //! visible player.
 
 use std::collections::HashMap;
-use std::io::Cursor;
+use std::io::{Cursor, Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rodio::{Decoder, OutputStream, Sink, Source as _};
@@ -45,9 +45,12 @@ impl Levels {
     }
 }
 
+/// A preview's sound, ready to play (already at its start).
+type Clip = Box<dyn rodio::Source<Item = f32> + Send>;
+
 enum Cmd {
-    /// generation, song bytes, start (ms), only part of the song (decode to the start).
-    Play(u64, Vec<u8>, u64, bool),
+    /// generation, the sound.
+    Play(u64, Clip),
     Stop,
     Volume(f32),
 }
@@ -81,7 +84,7 @@ impl Preview {
                 let mut latest = 0u64;
                 loop {
                     match rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(Cmd::Play(g, bytes, start, partial)) => {
+                        Ok(Cmd::Play(g, clip)) => {
                             if g < latest {
                                 continue;
                             }
@@ -97,18 +100,9 @@ impl Preview {
                             let dev = device.get_or_insert_with(|| OutputStream::try_default().map_err(|e| e.to_string()));
                             let Ok((_, handle)) = dev.as_ref() else { continue };
                             let Ok(s) = Sink::try_new(handle) else { continue };
-                            let Ok(mut dec) = Decoder::new(Cursor::new(bytes)) else { continue };
-                            // Get to the start here, not on the sound card's thread
-                            // (decoding a minute of song there made the start stutter).
-                            // A partial download can't be seek-estimated: decode up to the start.
-                            if partial || dec.try_seek(Duration::from_millis(start)).is_err() {
-                                let n = start * dec.sample_rate() as u64 * dec.channels() as u64 / 1000;
-                                let _ = dec.by_ref().take(n as usize).count();
-                            }
                             let stop = Arc::new(AtomicBool::new(false));
-                            let src = dec.convert_samples::<f32>().take_duration(Duration::from_millis(LENGTH_MS));
                             s.set_volume(volume);
-                            s.append(Tap::new(src, lv.clone(), stop.clone()));
+                            s.append(Tap::new(clip, lv.clone(), stop.clone()));
                             s.play();
                             sink = Some((s, stop));
                         }
@@ -188,28 +182,41 @@ impl Preview {
             };
             // Leave room for the whole preview before the song ends.
             let fit = |start: u64| if t.duration_ms > LENGTH_MS { start.min(t.duration_ms - LENGTH_MS) } else { 0 };
-            let (bytes, start, streamed) = match (&t.source, &stream) {
+            let clip: Clip = match (&t.source, &stream) {
                 (Source::File { path }, _) => {
                     let Ok(bytes) = std::fs::read(path) else { return };
                     if gen.load(Ordering::SeqCst) != g {
                         return;
                     }
                     let start = fit(pick(&|| loudest_ms(&bytes).unwrap_or(30_000)));
-                    (bytes, start, false)
+                    let Ok(mut dec) = Decoder::new(Cursor::new(bytes)) else { return };
+                    // Get to the start here, not on the sound card's thread.
+                    if dec.try_seek(Duration::from_millis(start)).is_err() {
+                        skip_ms(&mut dec, start);
+                    }
+                    Box::new(dec.convert_samples::<f32>().take_duration(Duration::from_millis(LENGTH_MS)))
                 }
                 (Source::Navidrome { .. }, Some(url)) => {
-                    // Only download up to the end of the preview (the server
-                    // sends 160 kbps MP3: 20 bytes a millisecond), not the
-                    // whole song: on a slow server that took many seconds.
+                    // The server starts the stream at the chorus (timeOffset)
+                    // and the preview plays while the rest arrives: no
+                    // waiting for the song from its beginning.
                     let start = fit(pick(&|| guess_ms(t.duration_ms)));
-                    let need = (start + LENGTH_MS + 3_000) * 20 + 64 * 1024;
-                    let Ok(bytes) = crate::audio::fetch_prefix(url, need) else { return };
-                    (bytes, start, true)
+                    if gen.load(Ordering::SeqCst) != g {
+                        return;
+                    }
+                    let url = format!("{url}&timeOffset={}", start / 1000);
+                    // 160 kbps MP3 is 20 bytes a millisecond.
+                    let Ok(live) = Live::open(&url, (LENGTH_MS + 3_000) * 20 + 64 * 1024, gen.clone(), g) else { return };
+                    // A few seconds in hand first, so playback never waits on the network.
+                    live.wait_for(64 * 1024);
+                    let Ok(mut dec) = Decoder::new(live) else { return };
+                    skip_ms(&mut dec, start % 1000);
+                    Box::new(dec.convert_samples::<f32>().take_duration(Duration::from_millis(LENGTH_MS)))
                 }
                 _ => return,
             };
             if gen.load(Ordering::SeqCst) == g {
-                let _ = tx.send(Cmd::Play(g, bytes, start, streamed));
+                let _ = tx.send(Cmd::Play(g, clip));
             }
         });
     }
@@ -288,6 +295,101 @@ pub fn highlight_ms(ly: &Lyrics) -> Option<u64> {
     let at = best.map(|(_, i)| lines[i].0).unwrap_or(first);
     // Start a breath before the line.
     Some(at.saturating_sub(400))
+}
+
+/// Decodes (and drops) the first `ms` of a song.
+fn skip_ms<R: Read + Seek + Send + Sync + 'static>(dec: &mut Decoder<R>, ms: u64) {
+    let n = ms * dec.sample_rate() as u64 * dec.channels() as u64 / 1000;
+    let _ = dec.by_ref().take(n as usize).count();
+}
+
+/// A download that can be read while it's still arriving.
+#[derive(Default)]
+struct Growing {
+    /// The bytes so far, and whether the download is over.
+    data: Mutex<(Vec<u8>, bool)>,
+    more: Condvar,
+}
+
+/// Reads a `Growing` download; waits for bytes that haven't come yet (up to
+/// a few seconds, then it counts as the end).
+struct Live {
+    g: Arc<Growing>,
+    pos: u64,
+}
+
+impl Live {
+    /// Starts downloading up to `max` bytes; stops early when the preview
+    /// generation moves on.
+    fn open(url: &str, max: u64, gen: Arc<AtomicU64>, g: u64) -> Result<Live, String> {
+        let resp = ureq::get(url).timeout(Duration::from_secs(30)).call().map_err(|e| e.to_string())?;
+        if resp.content_type().contains("json") || resp.content_type().contains("xml") {
+            return Err("not audio".into());
+        }
+        let grow = Arc::new(Growing::default());
+        let gw = grow.clone();
+        std::thread::spawn(move || {
+            let mut r = resp.into_reader();
+            let mut buf = vec![0u8; 16 * 1024];
+            let mut total = 0u64;
+            while total < max && gen.load(Ordering::SeqCst) == g {
+                match r.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        gw.data.lock().unwrap().0.extend_from_slice(&buf[..n]);
+                        gw.more.notify_all();
+                        total += n as u64;
+                    }
+                }
+            }
+            gw.data.lock().unwrap().1 = true;
+            gw.more.notify_all();
+        });
+        Ok(Live { g: grow, pos: 0 })
+    }
+
+    /// Waits until `want` bytes are in (or the download is over, or stalls); how many there are.
+    fn wait_for(&self, want: u64) -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        let mut d = self.g.data.lock().unwrap();
+        while (d.0.len() as u64) < want && !d.1 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+            d = self.g.more.wait_timeout(d, left).unwrap().0;
+        }
+        d.0.len() as u64
+    }
+}
+
+impl Read for Live {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        let len = self.wait_for(self.pos + 1);
+        if self.pos >= len || out.is_empty() {
+            return Ok(0);
+        }
+        let d = self.g.data.lock().unwrap();
+        let n = out.len().min((len - self.pos) as usize);
+        out[..n].copy_from_slice(&d.0[self.pos as usize..self.pos as usize + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl Seek for Live {
+    fn seek(&mut self, to: SeekFrom) -> std::io::Result<u64> {
+        let target = match to {
+            SeekFrom::Start(n) => n as i64,
+            SeekFrom::Current(d) => self.pos as i64 + d,
+            SeekFrom::End(d) => self.wait_for(u64::MAX) as i64 + d,
+        };
+        if target < 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "seek before start"));
+        }
+        self.pos = target as u64;
+        Ok(self.pos)
+    }
 }
 
 /// Where a song without timed lyrics probably gets going, when only part of
@@ -538,6 +640,63 @@ mod tests {
         let rest = dec.count() as u64 + skip as u64;
         eprintln!("full {total} samples, half the bytes gave {rest}");
         assert!(rest > total * 2 / 5 && rest < total * 3 / 5, "{rest} of {total}");
+    }
+
+    /// Needs a Navidrome login in STARLITE_DATA_DIR and a sound device:
+    /// cargo test -- --ignored navidrome_previews_start_quickly
+    #[test]
+    #[ignore]
+    fn navidrome_previews_start_quickly() {
+        let nd = crate::navidrome::Navidrome::load();
+        let pls = nd.playlists().unwrap();
+        let mut songs = Vec::new();
+        for pl in pls.iter().take(3) {
+            songs.extend(nd.playlist_tracks(&pl.id).unwrap().into_iter().take(3));
+        }
+        let mut p = Preview::new();
+        p.set_volume(0.0);
+        for t in songs.iter().take(6) {
+            let Source::Navidrome { song_id, .. } = &t.source else { continue };
+            let at = Instant::now();
+            p.play(t, nd.preview_url(song_id), true);
+            while !p.audible() && at.elapsed() < Duration::from_secs(10) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let start = p.starts.lock().unwrap().get(&t.id).copied();
+            eprintln!("{:>5} ms  (starts at {:?} s of {} s)", at.elapsed().as_millis(), start.map(|s| s / 1000), t.duration_ms / 1000);
+            std::thread::sleep(Duration::from_millis(1500));
+            // Real sound came through (the equalizer moves), not silence.
+            let level: f32 = p.levels.get().iter().sum();
+            assert!(level > 0.001, "silent preview for {}", t.title);
+            p.stop();
+            while p.audible() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// A live stream reads like the whole file once it has all arrived.
+    #[test]
+    fn live_reads_while_arriving() {
+        let grow = Arc::new(Growing::default());
+        let gw = grow.clone();
+        std::thread::spawn(move || {
+            for chunk in [b"hello ".as_slice(), b"wide ", b"world"] {
+                std::thread::sleep(Duration::from_millis(20));
+                gw.data.lock().unwrap().0.extend_from_slice(chunk);
+                gw.more.notify_all();
+            }
+            gw.data.lock().unwrap().1 = true;
+            gw.more.notify_all();
+        });
+        let mut live = Live { g: grow, pos: 0 };
+        let mut s = String::new();
+        live.read_to_string(&mut s).unwrap();
+        assert_eq!(s, "hello wide world");
+        assert_eq!(live.seek(SeekFrom::End(-5)).unwrap(), 11);
+        let mut w = String::new();
+        live.read_to_string(&mut w).unwrap();
+        assert_eq!(w, "world");
     }
 
     #[test]
