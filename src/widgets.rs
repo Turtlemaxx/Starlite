@@ -57,6 +57,16 @@ pub fn cover(ui: &Ui, icons: &mut Icons, rect: Rect, uri: Option<&str>, radius: 
     placeholder(ui, icons, rect, radius, fallback, theme);
 }
 
+/// A cover's texture once loaded, with the crop that fills `aspect`.
+pub fn cover_texture(ctx: &egui::Context, uri: Option<&str>, aspect: Vec2) -> Option<(egui::TextureId, Rect)> {
+    let uri = uri?;
+    let resolved = if uri.starts_with(crate::navidrome::COVER_SCHEME) { crate::navidrome::resolve_cover(uri)? } else { uri.to_string() };
+    match ctx.try_load_texture(&resolved, TextureOptions::LINEAR, SizeHint::Scale(1.0.into())) {
+        Ok(TexturePoll::Ready { texture }) => Some((texture.id, cover_uv(&resolved, texture.size, aspect))),
+        _ => None,
+    }
+}
+
 /// The part of an image to show so it fills `dst` without stretching
 /// (centre crop). YouTube's 4:3 thumbnails carry black bars above and below
 /// a 16:9 picture, so those are trimmed first.
@@ -211,4 +221,88 @@ pub fn fmt_duration(ms: u64) -> String {
     }
     let s = ms / 1000;
     format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// Songs whose title, artist or album contain every word of `query`
+/// (any case); all of them when the query is empty. Indices into `tracks`.
+pub fn filter_tracks(tracks: &[crate::library::Track], query: &str) -> Vec<usize> {
+    let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
+    tracks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
+            if words.is_empty() {
+                return true;
+            }
+            let hay = format!("{} {} {}", t.title, t.artist, t.album.as_deref().unwrap_or("")).to_lowercase();
+            words.iter().all(|w| hay.contains(w.as_str()))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// A glass search field: magnifier, text, and an x to clear it. Ctrl+F
+/// focuses it, Esc clears it.
+#[allow(clippy::too_many_arguments)]
+pub fn search_field(ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, id: Id, rect: Rect, value: &mut String, hint: &str, theme: Theme) {
+    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::F)) {
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    let focused = ui.memory(|m| m.has_focus(id));
+    let lit = ui.ctx().animate_bool_with_time(id.with("lit"), focused || !value.is_empty(), 0.18);
+    els.push(El::rect(rect, ppp, rect.height() * 0.5, 1.0, 3.0, Kind::Glass, 0.3 * lit, 0.0));
+    let icon_c = pos2(rect.left() + 20.0, rect.center().y);
+    let tint = if lit > 0.5 { theme.text() } else { theme.text_dim() };
+    icons.paint(ui, "search", icon_c, 16.0, tint);
+    let clear = !value.is_empty();
+    let inner = Rect::from_min_max(pos2(rect.left() + 38.0, rect.top()), pos2(rect.right() - if clear { 40.0 } else { 16.0 }, rect.bottom()));
+    let resp = ui.put(
+        inner,
+        egui::TextEdit::singleline(value)
+            .id(id)
+            .frame(false)
+            .font(font(14.0, "regular"))
+            .text_color(theme.text())
+            .hint_text(egui::RichText::new(hint).color(theme.text_dim()).font(font(14.0, "regular")))
+            .vertical_align(egui::Align::Center)
+            .margin(egui::Margin::ZERO)
+            .desired_width(inner.width()),
+    );
+    if (resp.has_focus() || resp.lost_focus()) && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        value.clear();
+    }
+    if clear {
+        let c = pos2(rect.right() - 22.0, rect.center().y);
+        let x = ui.interact(Rect::from_center_size(c, Vec2::splat(26.0)), id.with("clear"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Clear");
+        let h = ui.ctx().animate_bool_with_time(id.with("xh"), x.hovered(), 0.12);
+        if h > 0.0 {
+            ui.painter().circle_filled(c, 12.0, if theme.is_light() { Color32::from_black_alpha((18.0 * h) as u8) } else { Color32::from_white_alpha((22.0 * h) as u8) });
+        }
+        icons.paint(ui, "x", c, 14.0, theme.text_dim());
+        if x.clicked() {
+            value.clear();
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::filter_tracks;
+    use crate::library::{Source, Track};
+
+    fn t(title: &str, artist: &str, album: Option<&str>) -> Track {
+        Track { id: title.into(), title: title.into(), artist: artist.into(), album: album.map(String::from), artwork: None, permalink: None, duration_ms: 0, source: Source::File { path: "x".into() } }
+    }
+
+    #[test]
+    fn finds_by_title_artist_or_album_any_case() {
+        let list = [t("All Falls Down", "Kanye West", Some("The College Dropout")), t("505", "Arctic Monkeys", Some("Favourite Worst Nightmare")), t("Heartless", "Kanye West", None)];
+        assert_eq!(filter_tracks(&list, ""), vec![0, 1, 2]);
+        assert_eq!(filter_tracks(&list, "kanye"), vec![0, 2]);
+        assert_eq!(filter_tracks(&list, "  ARCTIC "), vec![1]);
+        assert_eq!(filter_tracks(&list, "dropout"), vec![0]);
+        assert_eq!(filter_tracks(&list, "kanye heart"), vec![2], "every word must match");
+        assert!(filter_tracks(&list, "nothing like this").is_empty());
+    }
 }

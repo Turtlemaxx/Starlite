@@ -8,7 +8,7 @@ use crate::glass::{El, Kind};
 use crate::icons::Icons;
 use crate::library::{downloads_dir, Cover, Track, DOWNLOADED_ID, LIKED_ID};
 use crate::theme::Theme;
-use crate::widgets::{cover, field, fmt_duration, font, icon_button, pill, playlist_cover, text_trunc};
+use crate::widgets::{cover, field, filter_tracks, fmt_duration, font, icon_button, pill, playlist_cover, search_field, text_trunc};
 
 struct Card {
     art: Option<String>,
@@ -355,9 +355,11 @@ impl Starlite {
             self.shuffle_play(tracks.to_vec());
         }
         bx = shuf_r.right() + 12.0;
+        let mut end = bx;
         match &kind {
             PlKind::User(id) => {
                 let c = pos2(bx + 19.0, by + 19.0);
+                end = bx + 38.0;
                 if icon_button(ui, icons, els, ppp, Id::new("pl_delete"), c, 38.0, "trash", true, false, theme).on_hover_text("Delete playlist").clicked() {
                     self.sound.click();
                     let name = title.to_string();
@@ -369,6 +371,7 @@ impl Starlite {
             }
             PlKind::Downloaded => {
                 let r = Rect::from_min_size(pos2(bx, by), vec2(140.0, 38.0));
+                end = r.right();
                 if pill(ui, icons, els, ppp, Id::new("pl_folder"), r, "Open folder", None, false, false, theme).clicked() {
                     self.sound.click();
                     let _ = std::process::Command::new("explorer").arg(downloads_dir()).spawn();
@@ -377,12 +380,54 @@ impl Starlite {
             PlKind::Remote => {
                 if let Some(url) = &link {
                     let r = Rect::from_min_size(pos2(bx, by), vec2(176.0, 38.0));
+                    end = r.right();
                     if pill(ui, icons, els, ppp, Id::new("pl_link"), r, "Open on YouTube", Some("external-link"), false, false, theme).clicked() {
                         ctx.open_url(egui::OpenUrl::new_tab(url));
                     }
                 }
             }
             PlKind::Liked => {}
+        }
+
+        // Search (finds songs by title, artist or album).
+        if self.pl_search.0 != title {
+            // Debug: STARLITE_SEARCH=<text> starts with that typed in.
+            self.pl_search = (title.to_string(), std::env::var("STARLITE_SEARCH").unwrap_or_default());
+        }
+        if !tracks.is_empty() {
+            let sw = (content.right() - end - 24.0).min(280.0);
+            if sw >= 150.0 {
+                let r = Rect::from_min_size(pos2(content.right() - sw, by), vec2(sw, 38.0));
+                let mut q = std::mem::take(&mut self.pl_search.1);
+                search_field(ui, icons, els, ppp, Id::new("pl_search"), r, &mut q, "Search songs", theme);
+                self.pl_search.1 = q;
+            }
+        }
+        let query = self.pl_search.1.trim().to_string();
+        let shown = filter_tracks(tracks, &query);
+        let no_match = !tracks.is_empty() && shown.is_empty();
+
+        // CD shelf instead of the list (Settings → Appearance).
+        if self.shelf.prefs.enabled && !tracks.is_empty() {
+            let area = Rect::from_min_max(pos2(content.left(), art.bottom() + 16.0), content.max);
+            if no_match {
+                p.text(pos2(area.center().x, area.top() + 80.0), Align2::CENTER_CENTER, format!("No songs match \u{201c}{query}\u{201d}"), font(15.0, "semibold"), theme.text());
+                return;
+            }
+            let dt = ctx.input(|i| i.stable_dt);
+            let mut anim = false;
+            let key = format!("{title}|{}|{query}", tracks.len());
+            let found: Vec<Track> = shown.iter().map(|&i| tracks[i].clone()).collect();
+            if let Some(j) = self.shelf_view(ui, area, content, &found, &key, dt, &mut anim) {
+                self.sound.click();
+                self.shelf.played(ctx.input(|i| i.pointer.hover_pos()));
+                // Play the whole playlist from that song.
+                self.play_list(tracks.to_vec(), shown[j]);
+            }
+            if anim {
+                ctx.request_repaint();
+            }
+            return;
         }
 
         // Track list in a glass bubble.
@@ -409,6 +454,11 @@ impl Starlite {
             }
             return;
         }
+        if no_match {
+            p.text(pos2(list.center().x, list.top() + 60.0), Align2::CENTER_CENTER, format!("No songs match \u{201c}{query}\u{201d}"), font(15.0, "semibold"), theme.text());
+            p.text(pos2(list.center().x, list.top() + 84.0), Align2::CENTER_CENTER, "Search looks at song names, artists and albums.", font(13.0, "regular"), theme.text_dim());
+            return;
+        }
 
         let current = self.current_track().map(|t| t.id);
         let can_remove = matches!(kind, PlKind::User(_) | PlKind::Liked);
@@ -419,6 +469,7 @@ impl Starlite {
         };
         let liked_ids: Vec<String> = self.lib.liked().tracks.iter().map(|t| t.id.clone()).collect();
         let mut acts: Vec<RowAct> = Vec::new();
+        let blocked = self.overlay_open();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
         child.set_clip_rect(inner);
         egui::ScrollArea::vertical()
@@ -427,9 +478,10 @@ impl Starlite {
             .show(&mut child, |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
                 let w = ui.available_width();
-                for (i, t) in tracks.iter().enumerate() {
+                for &i in &shown {
+                    let t = &tracks[i];
                     let (row, resp) = ui.allocate_exact_size(vec2(w, 54.0), Sense::click());
-                    let hovered = resp.contains_pointer();
+                    let hovered = resp.contains_pointer() && !blocked;
                     let rp = ui.painter();
                     let ha = ui.ctx().animate_bool_with_time(Id::new(("row_h", title, i)), hovered, 0.12);
                     if ha > 0.0 {
@@ -480,6 +532,9 @@ impl Starlite {
                 }
             });
 
+        if blocked {
+            acts.clear();
+        }
         for a in acts {
             self.sound.click();
             match a {
@@ -568,6 +623,13 @@ impl Starlite {
                     self.theme = t;
                     t.save();
                     self.apply_theme(&ctx);
+                }
+                let mut on = self.shelf.prefs.enabled;
+                let r = Rect::from_min_size(pos2(x0, top + bh + 28.0), vec2(content.width().min(520.0), 52.0));
+                if toggle_row(ui, r, Id::new("shelf_on"), "CD shelf", Some("Shows playlists as CD cases on a bookshelf"), &mut on, theme) {
+                    self.sound.click();
+                    self.shelf.prefs.enabled = on;
+                    self.shelf.prefs.save();
                 }
             }
             1 => {

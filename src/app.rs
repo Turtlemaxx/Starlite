@@ -114,6 +114,17 @@ pub struct Popover {
     pub open_t: f32,
 }
 
+/// The speed / bass dropdown above the player bar.
+pub struct FxPop {
+    pub anchor: Pos2,
+    pub open_t: f32,
+    /// The values as drawn (they glide to the real ones).
+    pub shown: [f32; 2],
+    /// Last snapped values, for the slider ticks.
+    pub ticked: [f32; 2],
+    pub tick_at: f64,
+}
+
 pub struct Starlite {
     pub renderer: Arc<Mutex<GlassRenderer>>,
     pub sound: Sound,
@@ -148,6 +159,8 @@ pub struct Starlite {
     pub lyrics: Option<(String, Option<Lyrics>)>,
     pub lyric_scroll: crate::nowplaying::LyricScroll,
     pub lprefs: crate::lyrics::LyricsPrefs,
+    /// CD shelf view of playlists (and its song previews).
+    pub shelf: crate::shelf::Shelf,
     /// Album palette for the fullscreen background (eased towards the target).
     pub palette: [[f32; 3]; 4],
     palette_target: [[f32; 3]; 4],
@@ -172,6 +185,11 @@ pub struct Starlite {
     pub mini: crate::mini::Mini,
     pub dialog: Option<Dialog>,
     pub popover: Option<Popover>,
+    pub fx_pop: Option<FxPop>,
+    /// Speed and bass (sound.json).
+    pub fx: crate::fx::FxPrefs,
+    /// Playlist search: (which playlist, what's typed).
+    pub pl_search: (String, String),
     pub toast: Option<(String, f64)>,
     pub time: f64,
 }
@@ -329,6 +347,7 @@ impl Starlite {
             lyrics: None,
             lyric_scroll: Default::default(),
             lprefs: crate::lyrics::LyricsPrefs::load(),
+            shelf: crate::shelf::Shelf::new(),
             palette: DEFAULT_PALETTE,
             palette_target: DEFAULT_PALETTE,
             palette_for: None,
@@ -370,6 +389,9 @@ impl Starlite {
             player,
             dialog: None,
             popover: None,
+            fx_pop: None,
+            fx: crate::fx::FxPrefs::load(),
+            pl_search: (String::new(), String::new()),
             toast: None,
             time: 0.0,
             mini: crate::mini::Mini::new(),
@@ -377,7 +399,10 @@ impl Starlite {
         app.yt_key_input = app.yt.api_key();
         if let Some(h) = hwnd {
             match YtPlayer::new(h, cc.egui_ctx.clone()) {
-                Ok(p) => app.ytp = Some(p),
+                Ok(mut p) => {
+                    p.set_speed(app.fx.speed);
+                    app.ytp = Some(p);
+                }
                 Err(e) => app.toast(e),
             }
         }
@@ -392,6 +417,8 @@ impl Starlite {
             let list = app.lib.downloaded.clone();
             app.play_list(list, 0);
         }
+        app.audio.set_speed(app.fx.speed);
+        app.audio.bass.set(app.fx.bass);
         app.apply_theme(&cc.egui_ctx);
         if app.yt.configured() {
             app.load_explore(&cc.egui_ctx);
@@ -725,7 +752,12 @@ impl Starlite {
         }
     }
 
-    fn now_is_youtube(&self) -> bool {
+    /// A dropdown or dialog is open: the page under it must not react.
+    pub fn overlay_open(&self) -> bool {
+        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some()
+    }
+
+    pub fn now_is_youtube(&self) -> bool {
         self.now.as_ref().is_some_and(|t| t.youtube_id().is_some())
     }
 
@@ -1327,8 +1359,15 @@ impl Starlite {
                 Action::ToggleFullscreen => {
                     self.fullscreen = !self.fullscreen && self.now.is_some();
                     self.popover = None;
+                    self.fx_pop = None;
+                }
+                Action::Sound(anchor) => {
+                    self.popover = None;
+                    self.fx_pop = Some(FxPop { anchor, open_t: 0.0, shown: [self.fx.speed, self.fx.bass], ticked: [self.fx.speed, self.fx.bass], tick_at: 0.0 });
                 }
                 Action::Volume(v) => {
+                    // Still turned down while a shelf preview plays.
+                    let v = v * self.shelf.duck;
                     self.audio.set_volume(v);
                     if let Some(p) = &self.ytp {
                         p.set_volume(v);
@@ -1400,7 +1439,7 @@ impl eframe::App for Starlite {
         if self.now.is_none() {
             self.fullscreen = false;
         }
-        if self.fullscreen && self.dialog.is_none() && self.popover.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self.fullscreen && self.dialog.is_none() && self.popover.is_none() && self.fx_pop.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.fullscreen = false;
         }
         let fs_target = if self.fullscreen { 1.0 } else { 0.0 };
@@ -1503,6 +1542,7 @@ impl eframe::App for Starlite {
                 // Window buttons (hidden in fullscreen).
                 self.window_buttons(ui, &mut icons, &mut els, ppp, full);
             }
+            self.shelf_after_frame(dt);
             if let Some(p) = self.ytp.as_mut() {
                 p.place(video);
             }
@@ -1519,8 +1559,15 @@ impl eframe::App for Starlite {
                 pos,
                 dur,
                 fullscreen: self.fullscreen,
+                fx_on: !self.fx.is_default(),
             };
             let po = self.player.ui(ui, &mut icons, bar, ppp, dt, theme, &mut els, now);
+            // Debug: STARLITE_FX_OPEN=1 opens the speed / bass dropdown once.
+            static FX_OPENED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if std::env::var("STARLITE_FX_OPEN").is_ok() && !FX_OPENED.swap(true, Ordering::Relaxed) {
+                let anchor = pos2(bar.right() - 392.0, bar.center().y);
+                self.fx_pop = Some(FxPop { anchor, open_t: 0.0, shown: [self.fx.speed, self.fx.bass], ticked: [self.fx.speed, self.fx.bass], tick_at: 0.0 });
+            }
             animating |= po.animating;
             player_out = Some((po, track));
 
@@ -1547,6 +1594,9 @@ impl eframe::App for Starlite {
             self.set_frame(ui, slot, full, frame, &els);
 
             // Overlays draw last, over the finished UI.
+            if self.fx_pop.is_some() {
+                self.draw_fx_popover(ui, ppp, dt, full, time, nav_w, &mut animating);
+            }
             if self.popover.is_some() {
                 self.draw_popover(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
             }
@@ -1605,6 +1655,9 @@ impl eframe::App for Starlite {
         self.audio.stop();
         if let Some(gl) = gl {
             self.renderer.lock().unwrap().destroy(gl);
+            if let Some(b) = self.shelf.blur_gl.lock().unwrap().as_ref() {
+                b.destroy(gl);
+            }
         }
     }
 }

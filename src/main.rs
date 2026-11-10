@@ -2,7 +2,10 @@
 
 mod app;
 mod audio;
+mod blur;
 mod discord;
+mod fx;
+mod fxpanel;
 mod glass;
 mod icons;
 mod library;
@@ -13,7 +16,9 @@ mod mini;
 mod navidrome;
 mod nowplaying;
 mod pages;
+mod preview;
 mod player;
+mod shelf;
 mod sound;
 mod theme;
 mod tree;

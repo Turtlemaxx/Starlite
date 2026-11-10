@@ -327,7 +327,7 @@ pub struct LyricScroll {
 
 /// Critically damped spring towards `target` (eases in and out, no
 /// overshoot); `smooth` is roughly the time to get there.
-fn smooth_damp(cur: f32, target: f32, vel: &mut f32, smooth: f32, dt: f32) -> f32 {
+pub fn smooth_damp(cur: f32, target: f32, vel: &mut f32, smooth: f32, dt: f32) -> f32 {
     let omega = 2.0 / smooth.max(1e-4);
     let x = omega * dt;
     let exp = 1.0 / (1.0 + x + 0.48 * x * x + 0.235 * x * x * x);

@@ -25,7 +25,7 @@ const PAGE: &str = r#"<!doctype html>
 <style>html,body{margin:0;height:100%;background:#000;overflow:hidden}#p{position:absolute;inset:0}</style>
 </head><body><div id="p"></div>
 <script>
-var player = null, ready = false, pending = null;
+var player = null, ready = false, pending = null, rate = 1;
 function send(o) { try { window.ipc.postMessage(JSON.stringify(o)); } catch (e) {} }
 function onYouTubeIframeAPIReady() {
   player = new YT.Player('p', {
@@ -33,7 +33,11 @@ function onYouTubeIframeAPIReady() {
     playerVars: { playsinline: 1, rel: 0, autoplay: 1, origin: location.origin },
     events: {
       onReady: function () { ready = true; send({ ev: 'ready' }); if (pending) { var p = pending; pending = null; load(p.id, p.vol); } },
-      onStateChange: function (e) { send({ ev: 'state', s: e.data }); report(); },
+      onStateChange: function (e) {
+        // A new video starts at normal speed: keep the chosen one.
+        if (e.data === 1 && player.getPlaybackRate && player.getPlaybackRate() !== rate) player.setPlaybackRate(rate);
+        send({ ev: 'state', s: e.data }); report();
+      },
       onError: function (e) { send({ ev: 'error', code: e.data }); }
     }
   });
@@ -53,6 +57,7 @@ function ctl(c, v) {
   else if (c === 'pause') player.pauseVideo();
   else if (c === 'stop') player.stopVideo();
   else if (c === 'vol') player.setVolume(v);
+  else if (c === 'rate') { rate = v; player.setPlaybackRate(v); }
   else if (c === 'seek') { player.seekTo(v, true); report(); }
 }
 </script>
@@ -76,6 +81,7 @@ pub struct YtPlayer {
     pos: f64,
     dur: f64,
     pos_at: std::time::Instant,
+    speed: f32,
     /// Bumped when a video plays to its end.
     pub finished: u64,
     bounds: Option<egui::Rect>,
@@ -132,7 +138,7 @@ impl YtPlayer {
             .map_err(|e| format!("Couldn't start the YouTube player (WebView2): {e}"))?;
         // WebView2 takes keyboard focus when it's created; give it back.
         let _ = webview.focus_parent();
-        Ok(YtPlayer { webview, events, status: Status::Idle, pos: 0.0, dur: 0.0, pos_at: std::time::Instant::now(), finished: 0, bounds: None, visible: false })
+        Ok(YtPlayer { webview, events, status: Status::Idle, pos: 0.0, dur: 0.0, pos_at: std::time::Instant::now(), speed: 1.0, finished: 0, bounds: None, visible: false })
     }
 
     pub fn load(&mut self, video_id: &str, volume: f32) {
@@ -168,9 +174,15 @@ impl YtPlayer {
     pub fn position(&self) -> (f64, f64) {
         let mut p = self.pos;
         if self.status == Status::Playing {
-            p += self.pos_at.elapsed().as_secs_f64().min(1.0);
+            p += self.pos_at.elapsed().as_secs_f64().min(1.0) * self.speed as f64;
         }
         (if self.dur > 0.0 { p.min(self.dur) } else { p }, self.dur)
+    }
+
+    /// Playback speed (YouTube rounds it to its own steps: 0.25 … 2).
+    pub fn set_speed(&mut self, v: f32) {
+        self.speed = v;
+        let _ = self.webview.evaluate_script(&format!("ctl('rate', {v:.2})"));
     }
 
     pub fn set_volume(&self, v: f32) {

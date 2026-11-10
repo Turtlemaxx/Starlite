@@ -221,6 +221,12 @@ impl Navidrome {
     }
 
     /// Where to stream a song from (None when not connected).
+    /// A smaller download for a short preview (MP3, 160 kbps).
+    pub fn preview_url(&self, song_id: &str) -> Option<String> {
+        let c = self.conn.lock().unwrap().clone()?;
+        Some(format!("{}/rest/stream.view?id={}&{}&format=mp3&maxBitRate=160", c.url, enc(song_id), Self::auth(&c)))
+    }
+
     pub fn stream_url(&self, song_id: &str, suffix: &str) -> Option<String> {
         let c = self.conn.lock().unwrap().clone()?;
         let transcode = if NATIVE.contains(&suffix) { "" } else { "&format=mp3&maxBitRate=320" };

@@ -70,6 +70,8 @@ pub struct NowPlaying<'a> {
     pub pos: f64,
     pub dur: f64,
     pub fullscreen: bool,
+    /// Speed or bass changed from normal (the sliders button lights up).
+    pub fx_on: bool,
 }
 
 pub enum Action {
@@ -84,6 +86,8 @@ pub enum Action {
     /// Jump to this many seconds into the song.
     Seek(f64),
     ToggleFullscreen,
+    /// Open the speed / bass dropdown above this point.
+    Sound(Pos2),
 }
 
 pub struct Player {
@@ -259,8 +263,8 @@ impl Player {
 
         // ── Transport (center) ──────────────────────────────────────
         // Centred, but pushed left when the bar is too narrow for the right
-        // cluster (its leftmost button, loop, sits 354 pt from the right end).
-        let cx = bar.center().x.min(bar.right() - 354.0 - 17.0 - 12.0 - 82.0);
+        // cluster (its leftmost button, speed & bass, sits 392 pt from the right end).
+        let cx = bar.center().x.min(bar.right() - 392.0 - 17.0 - 12.0 - 82.0);
         let play_resp = round_button(ui, id.with("play"), pos2(cx, cy), 46.0, 1.0, 0.25, ppp, els, has_track);
         let prev_resp = round_button(ui, id.with("prev"), pos2(cx - 62.0, cy), 40.0, 0.0, 0.0, ppp, els, has_track);
         let next_resp = round_button(ui, id.with("next"), pos2(cx + 62.0, cy), 40.0, 0.0, 0.0, ppp, els, has_track);
@@ -409,7 +413,8 @@ impl Player {
         let add_c = pos2(dl_c.x - 38.0, cy);
         let like_c = pos2(add_c.x - 38.0, cy);
         let loop_c = pos2(like_c.x - 38.0, cy);
-        for c in [dl_c, add_c, like_c, loop_c] {
+        let fx_c = pos2(loop_c.x - 38.0, cy);
+        for c in [dl_c, add_c, like_c, loop_c, fx_c] {
             ctl.push(Rect::from_center_size(c, Vec2::splat(34.0)));
         }
 
@@ -461,6 +466,14 @@ impl Player {
         let ltint = if self.looping == Loop::Off { dim } else { accent };
         icons.paint(ui, if self.looping == Loop::One { "repeat-1" } else { "repeat" }, loop_c, lsize, ltint);
 
+        // Speed and bass.
+        let fx_on = ctx.animate_bool_with_time(id.with("fx_on"), now.fx_on, 0.2);
+        if round_button(ui, id.with("fx"), fx_c, 34.0, fx_on, 0.2, ppp, els, true).on_hover_text("Speed and bass").clicked() {
+            out.clicked = true;
+            out.actions.push(Action::Sound(fx_c));
+        }
+        icons.paint(ui, "sliders-horizontal", fx_c, 17.0, if now.fx_on { accent } else { dim });
+
         self.controls = ctl;
         out
     }
@@ -489,7 +502,7 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 760.0))), events, ..Default::default() };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let now = NowPlaying { track: Some(track), playing: true, loading: false, liked: false, pos: 10.0, dur: 200.0, fullscreen: false };
+                let now = NowPlaying { track: Some(track), playing: true, loading: false, liked: false, pos: 10.0, dur: 200.0, fullscreen: false, fx_on: false };
                 let mut els = Vec::new();
                 out = Some(player.ui(ui, icons, BAR, 1.0, 1.0 / 60.0, Theme::Dark, &mut els, now));
             });
@@ -527,7 +540,7 @@ mod tests {
     #[test]
     fn clicking_a_button_does_not_seek() {
         // The next button sits 62 pt right of the bar's centre.
-        let p = pos2(BAR.center().x.min(BAR.right() - 465.0) + 62.0, BAR.center().y);
+        let p = pos2(BAR.center().x.min(BAR.right() - 503.0) + 62.0, BAR.center().y);
         let acts = click(p);
         assert!(acts.iter().any(|a| matches!(a, Action::Next)), "next pressed");
         assert!(!acts.iter().any(|a| matches!(a, Action::Seek(_))), "no seek");

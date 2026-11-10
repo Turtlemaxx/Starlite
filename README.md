@@ -24,6 +24,10 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 <p align="center"><img src="docs/screenshots/fullscreen.png" width="720" alt="Full screen Now Playing"></p>
 
+**CD shelf.** Turn it on in Settings → Appearance and your playlists become CD cases on a bookshelf. Hover one and it slides out, turns to face you and tilts with your mouse, the disc slides out and a few seconds of the song play (its chorus when the lyrics show one).
+
+**Search and sound.** Every playlist has a search bar (song, artist or album; Ctrl+F). The sliders button in the player bar opens speed and bass.
+
 **Mini player.** Switch to another app (or minimize Starlite) and a small card slides out of the screen edge with the cover and song. Hover it for controls. You can move it, resize it, pick its buttons, show it only while music is playing, or turn it off in Settings.
 
 <p align="center"><img src="docs/screenshots/mini-player.png" width="357" alt="Mini player"></p>
@@ -40,7 +44,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 ## Install
 
-1. Download `Starlite-0.1.4-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
+1. Download `Starlite-0.2.0-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
 2. Unzip it anywhere and run `Starlite.exe`.
 
 Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, which Windows 11 already has.

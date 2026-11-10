@@ -9,7 +9,7 @@ use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use rodio::{Decoder, OutputStream, Sink};
+use rodio::{Decoder, OutputStream, Sink, Source as _};
 
 use crate::library::{Source, Track};
 
@@ -31,6 +31,8 @@ pub struct Shared {
     pub pos_ms: u64,
     pub dur_ms: u64,
     pub pos_at: Instant,
+    /// Playback speed (1 = normal).
+    pub speed: f32,
 }
 
 enum Cmd {
@@ -41,6 +43,7 @@ enum Cmd {
     Resume,
     Stop,
     Volume(f32),
+    Speed(f32),
     Seek(u64),
 }
 
@@ -48,13 +51,17 @@ pub struct Audio {
     tx: Sender<Cmd>,
     pub shared: Arc<Mutex<Shared>>,
     gen: AtomicU64,
+    /// Bass setting, read by the playing song's filter.
+    pub bass: crate::fx::BassKnob,
 }
 
 impl Audio {
     pub fn new(ctx: egui::Context) -> Audio {
-        let shared = Arc::new(Mutex::new(Shared { status: Status::Idle, track: None, finished: 0, pos_ms: 0, dur_ms: 0, pos_at: Instant::now() }));
+        let shared = Arc::new(Mutex::new(Shared { status: Status::Idle, track: None, finished: 0, pos_ms: 0, dur_ms: 0, pos_at: Instant::now(), speed: 1.0 }));
         let (tx, rx) = channel::<Cmd>();
         let sh = shared.clone();
+        let bass = crate::fx::BassKnob::default();
+        let knob = bass.clone();
         std::thread::Builder::new()
             .name("audio".into())
             .spawn(move || {
@@ -62,6 +69,7 @@ impl Audio {
                 let mut sink: Option<Sink> = None;
                 let mut current = 0u64;
                 let mut volume = 0.7f32;
+                let mut speed = 1.0f32;
                 // After a seek, rodio can report the old position for a moment;
                 // ignore readings far from the target for a short while.
                 let mut seek_hold: Option<(u64, Instant)> = None;
@@ -91,7 +99,8 @@ impl Audio {
                                 let dec = Decoder::new(Cursor::new(bytes)).map_err(|e| format!("Can't decode this song: {e}"))?;
                                 let total = rodio::Source::total_duration(&dec);
                                 s.set_volume(volume);
-                                s.append(dec);
+                                s.set_speed(speed);
+                                s.append(crate::fx::Bass::new(dec.convert_samples::<f32>(), knob.clone()));
                                 s.play();
                                 Ok((s, total))
                             })();
@@ -151,6 +160,13 @@ impl Audio {
                                 });
                             }
                         }
+                        Ok(Cmd::Speed(v)) => {
+                            speed = v;
+                            if let Some(s) = &sink {
+                                s.set_speed(v);
+                            }
+                            set(&|st| st.speed = v);
+                        }
                         Ok(Cmd::Volume(v)) => {
                             volume = v;
                             if let Some(s) = &sink {
@@ -183,7 +199,7 @@ impl Audio {
                 }
             })
             .expect("spawn audio thread");
-        Audio { tx, shared, gen: AtomicU64::new(0) }
+        Audio { tx, shared, gen: AtomicU64::new(0), bass }
     }
 
     /// Plays a file, or the song at `stream` (a Navidrome URL), which is
@@ -227,10 +243,14 @@ impl Audio {
         let s = self.shared.lock().unwrap();
         let mut pos = s.pos_ms as f64 / 1000.0;
         if s.status == Status::Playing {
-            pos += s.pos_at.elapsed().as_secs_f64().min(0.5);
+            pos += s.pos_at.elapsed().as_secs_f64().min(0.5) * s.speed as f64;
         }
         let dur = s.dur_ms as f64 / 1000.0;
         (if dur > 0.0 { pos.min(dur) } else { pos }, dur)
+    }
+
+    pub fn set_speed(&self, v: f32) {
+        let _ = self.tx.send(Cmd::Speed(v));
     }
 
     pub fn set_volume(&self, v: f32) {
@@ -246,7 +266,7 @@ impl Audio {
 }
 
 /// Downloads a streamed song (up to 1 GB) into memory.
-fn fetch(url: &str) -> Result<Vec<u8>, String> {
+pub fn fetch(url: &str) -> Result<Vec<u8>, String> {
     let resp = ureq::get(url).timeout(Duration::from_secs(120)).call().map_err(|e| match e {
         ureq::Error::Status(code, _) => format!("The server couldn't send this song (error {code})"),
         ureq::Error::Transport(t) => format!("Can't reach the server ({})", t.kind()),
