@@ -50,6 +50,8 @@ enum NavKey {
     Explore,
     Navidrome,
     Playlist(String),
+    /// A Navidrome playlist added to your playlists.
+    NdLink(String),
     Liked,
     Downloaded,
     Settings,
@@ -64,6 +66,8 @@ pub enum Job {
     YtKeyTest(Result<(), String>),
     NdConnect(Result<(), String>),
     NdPlaylists(Result<Vec<RemotePlaylist>, String>),
+    /// The custom theme's picture, read (for that path).
+    BgImage(Option<PathBuf>, Option<crate::theme::BgImage>),
 }
 
 /// The Navidrome page: the connect form and the loaded playlists.
@@ -96,6 +100,8 @@ pub struct RemoteView {
     pub pl: RemotePlaylist,
     /// From Navidrome (else YouTube).
     pub navidrome: bool,
+    /// Opened from your playlists in the sidebar (no back button).
+    pub linked: bool,
     pub tracks: Option<Result<Vec<Track>, String>>,
 }
 
@@ -106,6 +112,15 @@ pub struct Dialog {
     pub open_t: f32,
     /// Add this song once the playlist exists (from the player's "+").
     pub add_after: Option<Track>,
+    /// Songs loaded from an .m3u file (and how many weren't found).
+    pub import: Option<(Vec<Track>, usize)>,
+}
+
+/// The right-click menu on a Navidrome playlist.
+pub struct NdMenu {
+    pub at: Pos2,
+    pub pl: RemotePlaylist,
+    pub open_t: f32,
 }
 
 pub struct Popover {
@@ -186,6 +201,12 @@ pub struct Starlite {
     pub dialog: Option<Dialog>,
     pub popover: Option<Popover>,
     pub fx_pop: Option<FxPop>,
+    pub nd_menu: Option<NdMenu>,
+    /// The custom theme's colours and picture.
+    pub custom: crate::theme::CustomTheme,
+    pub color_pick: Option<crate::customize::ColorPick>,
+    /// Which picture the glass renderer has (None = not asked yet).
+    bg_for: Option<Option<PathBuf>>,
     /// Speed and bass (sound.json).
     pub fx: crate::fx::FxPrefs,
     /// Playlist search: (which playlist, what's typed).
@@ -296,6 +317,41 @@ fn lerp_rect(a: Rect, b: Rect, t: f32) -> Rect {
     Rect::from_min_max(a.min.lerp(b.min, t), a.max.lerp(b.max, t))
 }
 
+/// Debug: STARLITE_SHOTS=<dir>,<count>,<ms>,<delay ms> saves `count` frames
+/// of the window as dir/fNN.png, `ms` apart, starting after `delay`.
+fn debug_shots(ctx: &egui::Context) {
+    static STATE: Mutex<(usize, f64)> = Mutex::new((0, -1.0));
+    let Ok(spec) = std::env::var("STARLITE_SHOTS") else { return };
+    let parts: Vec<&str> = spec.split(',').collect();
+    let (Some(dir), Some(n), Some(ms), Some(delay)) = (parts.first(), parts.get(1).and_then(|v| v.parse::<usize>().ok()), parts.get(2).and_then(|v| v.parse::<f64>().ok()), parts.get(3).and_then(|v| v.parse::<f64>().ok())) else { return };
+    let now = ctx.input(|i| i.time);
+    let mut st = STATE.lock().unwrap();
+    for e in ctx.input(|i| i.raw.events.clone()) {
+        if let egui::Event::Screenshot { image, .. } = e {
+            let [w, h] = image.size;
+            let bytes: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_array()).collect();
+            if let Some(img) = image::RgbaImage::from_raw(w as u32, h as u32, bytes) {
+                let _ = std::fs::create_dir_all(dir);
+                let _ = img.save(std::path::Path::new(dir).join(format!("f{:02}.png", st.0)));
+            }
+            st.0 += 1;
+            if st.0 >= n {
+                ctx.send_viewport_cmd(ViewportCommand::Close);
+            }
+        }
+    }
+    let due = delay / 1000.0 + st.0 as f64 * ms / 1000.0;
+    if st.0 < n && now >= due && st.1 < due {
+        st.1 = due;
+        ctx.send_viewport_cmd(ViewportCommand::Screenshot(Default::default()));
+    }
+    ctx.request_repaint_after(Duration::from_millis(15));
+}
+
+fn rgb_f(c: [u8; 3]) -> [f32; 3] {
+    [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]
+}
+
 pub fn smooth(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
@@ -390,6 +446,10 @@ impl Starlite {
             dialog: None,
             popover: None,
             fx_pop: None,
+            nd_menu: None,
+            custom: crate::theme::CustomTheme::get(),
+            color_pick: None,
+            bg_for: None,
             fx: crate::fx::FxPrefs::load(),
             pl_search: (String::new(), String::new()),
             toast: None,
@@ -409,6 +469,14 @@ impl Starlite {
         // Debug: STARLITE_DIALOG=1 opens the new-playlist dialog.
         if std::env::var("STARLITE_DIALOG").is_ok() {
             app.open_dialog(None);
+            // Debug: STARLITE_M3U=<file> loads that .m3u into it.
+            if let Ok(f) = std::env::var("STARLITE_M3U") {
+                let known = app.lib.downloaded.clone();
+                if let (Some(d), Ok(r)) = (app.dialog.as_mut(), crate::m3u::import(std::path::Path::new(&f), &known)) {
+                    d.name = r.name;
+                    d.import = Some((r.tracks, r.missing));
+                }
+            }
         }
         // Debug: STARLITE_FULLSCREEN=1 opens fullscreen Now Playing (with autoplay).
         app.fullscreen = std::env::var("STARLITE_FULLSCREEN").is_ok();
@@ -463,7 +531,7 @@ impl Starlite {
 
     pub fn open_yt_playlist(&mut self, ctx: &egui::Context, pl: RemotePlaylist) {
         let id = pl.id.clone();
-        self.remote = Some(RemoteView { pl, navidrome: false, tracks: None });
+        self.remote = Some(RemoteView { pl, navidrome: false, linked: false, tracks: None });
         self.view = View::YtPlaylist;
         let (yt, tx, ctx) = (self.yt.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -500,9 +568,9 @@ impl Starlite {
         });
     }
 
-    pub fn open_nd_playlist(&mut self, ctx: &egui::Context, pl: RemotePlaylist) {
+    pub fn open_nd_playlist(&mut self, ctx: &egui::Context, pl: RemotePlaylist, linked: bool) {
         let id = pl.id.clone();
-        self.remote = Some(RemoteView { pl, navidrome: true, tracks: None });
+        self.remote = Some(RemoteView { pl, navidrome: true, linked, tracks: None });
         self.view = View::YtPlaylist;
         let (nd, tx, ctx) = (self.nd.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -552,6 +620,14 @@ impl Starlite {
                         v.tracks = Some(r);
                     }
                 }
+                Job::BgImage(path, img) => {
+                    if self.bg_for.as_ref() == Some(&path) {
+                        if path.is_some() && img.is_none() {
+                            self.toast("Couldn't read the background picture");
+                        }
+                        self.renderer.lock().unwrap().pending_bg = Some(img);
+                    }
+                }
                 Job::Palette(id, pal) => {
                     if self.palette_for.as_deref() == Some(id.as_str()) {
                         self.palette_target = pal.unwrap_or(DEFAULT_PALETTE);
@@ -591,10 +667,21 @@ impl Starlite {
                     self.ndst.loaded = true;
                     match r {
                         Ok(p) => {
-                            // Debug: STARLITE_ND_PLAY=<n> opens the first playlist and plays song n.
-                            if std::env::var("STARLITE_ND_PLAY").is_ok() {
+                            self.lib.refresh_nd_links(&p);
+                            // Debug: STARLITE_ND_MENU=x,y opens the first playlist's right-click menu there.
+                            if let Some((x, y)) = std::env::var("STARLITE_ND_MENU").ok().and_then(|v| {
+                                let (x, y) = v.split_once(',')?;
+                                Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
+                            }) {
                                 if let Some(first) = p.first().cloned() {
-                                    self.open_nd_playlist(ctx, first);
+                                    self.nd_menu = Some(NdMenu { at: pos2(x, y), pl: first, open_t: 0.0 });
+                                }
+                            }
+                            // Debug: STARLITE_ND_PLAY=<n> opens the first playlist and plays song n
+                            // (STARLITE_ND_OPEN=1 only opens it).
+                            if std::env::var("STARLITE_ND_PLAY").is_ok() || std::env::var("STARLITE_ND_OPEN").is_ok() {
+                                if let Some(first) = p.first().cloned() {
+                                    self.open_nd_playlist(ctx, first, false);
                                 }
                             }
                             self.ndst.playlists = p;
@@ -754,7 +841,7 @@ impl Starlite {
 
     /// A dropdown or dialog is open: the page under it must not react.
     pub fn overlay_open(&self) -> bool {
-        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some()
+        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some()
     }
 
     pub fn now_is_youtube(&self) -> bool {
@@ -833,7 +920,7 @@ impl Starlite {
 
     pub fn open_dialog(&mut self, add_after: Option<Track>) {
         self.popover = None;
-        self.dialog = Some(Dialog { name: String::new(), cover: Cover::Preset("disc-3".into()), error: None, open_t: 0.0, add_after });
+        self.dialog = Some(Dialog { name: String::new(), cover: Cover::Preset("disc-3".into()), error: None, open_t: 0.0, add_after, import: None });
     }
 
     // ── Navigation ─────────────────────────────────────────────────
@@ -863,9 +950,10 @@ impl Starlite {
         let list_top = lerp(184.0, 178.0, t) + shift;
         let list_clip = Rect::from_min_max(pos2(0.0, list_top - 2.0), pos2(w, (liked.top() - 10.0).max(list_top)));
         let pitch = lerp(52.0, 42.0, t);
-        for (i, p) in self.lib.user_playlists().enumerate() {
+        let keys = self.lib.user_playlists().map(|p| NavKey::Playlist(p.id.clone())).chain(self.lib.nd_links.iter().map(|l| NavKey::NdLink(l.id.clone())));
+        for (i, k) in keys.enumerate() {
             let y = list_top + i as f32 * pitch - self.nav_scroll;
-            rows.push((NavKey::Playlist(p.id.clone()), row(y, y)));
+            rows.push((k, row(y, y)));
         }
         rows.push((NavKey::Liked, liked));
         rows.push((NavKey::Downloaded, dl));
@@ -881,6 +969,7 @@ impl Starlite {
             View::Playlist(id) if id == DOWNLOADED_ID => Some(NavKey::Downloaded),
             View::Playlist(id) => Some(NavKey::Playlist(id.clone())),
             View::Navidrome => Some(NavKey::Navidrome),
+            View::YtPlaylist if self.remote.as_ref().is_some_and(|r| r.navidrome && r.linked) => self.remote.as_ref().map(|r| NavKey::NdLink(r.pl.id.clone())),
             View::YtPlaylist if self.remote.as_ref().is_some_and(|r| r.navidrome) => Some(NavKey::Navidrome),
             View::YtPlaylist => None,
         }
@@ -896,7 +985,7 @@ impl Starlite {
         let p = ui.painter().clone();
 
         // Scroll the playlist list if it overflows.
-        let n = self.lib.user_playlists().count() as f32;
+        let n = (self.lib.user_playlists().count() + self.lib.nd_links.len()) as f32;
         let content_h = n * lerp(52.0, 42.0, t);
         let max_scroll = (content_h - lay.list_clip.height() + 6.0).max(0.0);
         if ui.rect_contains_pointer(lay.list_clip) {
@@ -928,8 +1017,9 @@ impl Starlite {
         let mut hover_el = None;
         let mut sel_press = 0.0;
         let mut clicked: Option<NavKey> = None;
+        let mut right_clicked: Option<(RemotePlaylist, Pos2)> = None;
         for (key, rect) in &lay.rows {
-            let in_list = matches!(key, NavKey::Playlist(_));
+            let in_list = matches!(key, NavKey::Playlist(_) | NavKey::NdLink(_));
             if in_list && (rect.bottom() < lay.list_clip.top() || rect.top() > lay.list_clip.bottom()) {
                 continue;
             }
@@ -951,6 +1041,13 @@ impl Starlite {
             if resp.clicked() && !is_sel {
                 clicked = Some(key.clone());
             }
+            if let NavKey::NdLink(lid) = key {
+                if resp.secondary_clicked() {
+                    if let (Some(l), Some(at)) = (self.lib.nd_link(lid), resp.interact_pointer_pos()) {
+                        right_clicked = Some((l.to_remote(), at));
+                    }
+                }
+            }
 
             let name: String = match key {
                 NavKey::Explore => "Explore".into(),
@@ -959,6 +1056,7 @@ impl Starlite {
                 NavKey::Liked => "Liked Music".into(),
                 NavKey::Downloaded => "Downloaded Music".into(),
                 NavKey::Playlist(pid) => self.lib.playlists.iter().find(|p| &p.id == pid).map(|p| p.name.clone()).unwrap_or_default(),
+                NavKey::NdLink(lid) => self.lib.nd_link(lid).map(|l| l.title.clone()).unwrap_or_default(),
             };
             if label_a < 0.5 {
                 resp.on_hover_text(name.clone());
@@ -979,6 +1077,16 @@ impl Starlite {
                         cu.set_clip_rect(lay.list_clip);
                         let cover = pl.cover.clone();
                         playlist_cover(&cu, icons, c, &cover, 7.0, theme);
+                    }
+                    None
+                }
+                NavKey::NdLink(lid) => {
+                    if let Some(l) = self.lib.nd_link(lid) {
+                        let c = Rect::from_center_size(lead_c, Vec2::splat(lerp(34.0, 26.0, t)));
+                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(lay.list_clip));
+                        cu.set_clip_rect(lay.list_clip);
+                        let art = l.artwork.clone();
+                        crate::widgets::cover(&cu, icons, c, art.as_deref(), 7.0, "cloudy", theme);
                     }
                     None
                 }
@@ -1023,7 +1131,7 @@ impl Starlite {
             let stretch = (self.sel_v.abs() * 0.03).min(16.0);
             let squeeze = (self.sel_v.abs() * 0.008).min(6.0);
             let mut pill_r = Rect::from_center_size(cur.center(), vec2(cur.width() - squeeze + 4.0 * sel_press, cur.height() + stretch + 4.0 * sel_press));
-            if matches!(selected, Some(NavKey::Playlist(_))) {
+            if matches!(selected, Some(NavKey::Playlist(_) | NavKey::NdLink(_))) {
                 pill_r = pill_r.intersect(lay.list_clip);
             }
             if self.sel_vis > 0.002 && pill_r.width() > 1.0 && pill_r.height() > 1.0 {
@@ -1043,6 +1151,17 @@ impl Starlite {
             self.nav_open = !self.nav_open;
         }
 
+        if let Some((pl, at)) = right_clicked {
+            self.sound.click();
+            self.nd_menu = Some(NdMenu { at, pl, open_t: 0.0 });
+        }
+        if let Some(NavKey::NdLink(lid)) = &clicked {
+            self.sound.click();
+            if let Some(pl) = self.lib.nd_link(lid).map(|l| l.to_remote()) {
+                self.open_nd_playlist(&ctx, pl, true);
+            }
+            return;
+        }
         if let Some(k) = clicked {
             self.sound.click();
             self.view = match k {
@@ -1060,6 +1179,7 @@ impl Starlite {
                     View::Playlist(DOWNLOADED_ID.into())
                 }
                 NavKey::Playlist(id) => View::Playlist(id),
+                NavKey::NdLink(_) => View::Navidrome,
             };
         }
     }
@@ -1081,6 +1201,9 @@ impl Starlite {
             dim: 0.0,
             fs: smooth(self.fs_t),
             palette: self.palette,
+            custom_bg: rgb_f(self.custom.background),
+            accent: rgb_f(self.custom.accent),
+            light_ui: self.custom.is_light(),
         }
     }
 
@@ -1144,6 +1267,7 @@ impl Starlite {
         playlist_cover(ui, icons, preview, &cover, 16.0, theme);
         p.text(pos2(preview.right() + 18.0, preview.top() + 12.0), Align2::LEFT_CENTER, "Name", font(12.0, "semibold"), dim);
         let name_rect = Rect::from_min_size(pos2(preview.right() + 18.0, preview.top() + 28.0), vec2(panel.right() - 28.0 - preview.right() - 18.0, 40.0));
+        let import = d.import.as_ref().map(|(t, m)| (t.len(), *m));
         let fresp = field(ui, &mut els, ppp, name_rect, &mut name, "My playlist", false, true, theme);
         if open_t < 0.15 {
             fresp.request_focus();
@@ -1151,6 +1275,12 @@ impl Starlite {
         let submit = fresp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
         if let Some(e) = &error {
             p.text(pos2(name_rect.left(), name_rect.bottom() + 14.0), Align2::LEFT_CENTER, e, font(12.0, "regular"), Color32::from_rgb(235, 90, 100).gamma_multiply(ot));
+        } else if let Some((n, missing)) = import {
+            let mut s = format!("{n} song{} from the .m3u", if n == 1 { "" } else { "s" });
+            if missing > 0 {
+                s += &format!(" · {missing} not found");
+            }
+            text_trunc(&p, pos2(name_rect.left(), name_rect.bottom() + 14.0), Align2::LEFT_CENTER, &s, font(12.0, "semibold"), dim, name_rect.width());
         }
 
         // Cover choices: Lucide presets + "choose image".
@@ -1194,6 +1324,9 @@ impl Starlite {
         let by = panel.bottom() - 28.0 - 40.0;
         let create_r = Rect::from_min_size(pos2(panel.right() - 28.0 - 124.0, by), vec2(124.0, 40.0));
         let cancel_r = Rect::from_min_size(pos2(create_r.left() - 12.0 - 110.0, by), vec2(110.0, 40.0));
+        let m3u_r = Rect::from_min_size(pos2(x0, by), vec2(142.0, 40.0));
+        let m3u = pill(ui, icons, &mut els, ppp, ui.id().with("dlg_m3u"), m3u_r, "Load .m3u", Some("file-music"), false, true, theme)
+            .on_hover_text("Fill the playlist from an .m3u or .m3u8 file");
         let cancel = pill(ui, icons, &mut els, ppp, ui.id().with("dlg_cancel"), cancel_r, "Cancel", None, false, true, theme);
         let create = pill(ui, icons, &mut els, ppp, ui.id().with("dlg_create"), create_r, "Create", Some("plus"), true, true, theme);
 
@@ -1218,6 +1351,25 @@ impl Starlite {
                 }
             }
         }
+        if m3u.clicked() {
+            self.sound.click();
+            if let Some(path) = rfd::FileDialog::new().add_filter("Playlist", &["m3u", "m3u8"]).pick_file() {
+                let mut known = self.lib.downloaded.clone();
+                known.extend(self.lib.playlists.iter().flat_map(|p| p.tracks.iter().cloned()));
+                match crate::m3u::import(&path, &known) {
+                    Ok(r) if r.tracks.is_empty() => d.error = Some(format!("None of its {} songs were found on this PC", r.missing)),
+                    Ok(r) => {
+                        if d.name.trim().is_empty() {
+                            d.name = r.name;
+                        }
+                        d.error = None;
+                        d.import = Some((r.tracks, r.missing));
+                    }
+                    Err(e) => d.error = Some(e),
+                }
+            }
+            return;
+        }
         if cancel.clicked() || close {
             self.sound.click();
             self.dialog = None;
@@ -1232,6 +1384,10 @@ impl Starlite {
             self.sound.click();
             let d = self.dialog.take().unwrap();
             let id = self.lib.create(name.clone(), d.cover);
+            if let Some((tracks, _)) = &d.import {
+                let n = self.lib.add_many(&id, tracks);
+                self.toast(format!("Loaded {n} song{}", if n == 1 { "" } else { "s" }));
+            }
             if let Some(t) = d.add_after {
                 self.lib.add_to(&id, &t);
                 self.toast(format!("Added to {name}"));
@@ -1317,6 +1473,58 @@ impl Starlite {
 }
 
 impl Starlite {
+    /// Right-click menu on a Navidrome playlist: add it to your playlists
+    /// (or take it away again).
+    #[allow(clippy::too_many_arguments)]
+    fn draw_nd_menu(&mut self, ui: &mut egui::Ui, icons: &mut Icons, ppp: f32, dt: f32, full: Rect, time: f32, nav_w: f32, animating: &mut bool) {
+        let theme = self.theme;
+        let Some(m) = self.nd_menu.as_mut() else { return };
+        m.open_t = (m.open_t + dt * 9.0).min(1.0);
+        if m.open_t < 1.0 {
+            *animating = true;
+        }
+        let ot = smooth(m.open_t);
+        let (at, pl) = (m.at, m.pl.clone());
+        let linked = self.lib.nd_link(&pl.id).is_some();
+        let back = ui.interact(full, ui.id().with("ndm_back"), Sense::click());
+        let label = if linked { "Remove from your playlists" } else { "Add to your playlists" };
+        let w = ui.painter().layout_no_wrap(label.to_string(), font(13.5, "semibold"), theme.text()).size().x + 70.0;
+        let h = 52.0;
+        let x = at.x.min(full.right() - w - 10.0);
+        let y = if at.y + h + 10.0 > full.bottom() { at.y - h } else { at.y };
+        let panel = Rect::from_min_size(pos2(x, y - 6.0 * (1.0 - ot)), vec2(w, h));
+        let mut els = vec![El::rect(panel, ppp, 18.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0)];
+        let slot = ui.painter().add(egui::Shape::Noop);
+        let r = panel.shrink(6.0);
+        let id = ui.id().with("ndm_row");
+        let resp = ui.interact(r, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let hv = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered(), 0.12);
+        if hv > 0.001 {
+            els.push(El::rect(r, ppp, 13.0, hv, 2.0, Kind::Layered, 0.3, 0.0));
+        }
+        let fg = theme.text().gamma_multiply(ot);
+        icons.paint(ui, if linked { "list-x" } else { "list-plus" }, pos2(r.left() + 20.0, r.center().y), 17.0, fg);
+        ui.painter().text(pos2(r.left() + 40.0, r.center().y), Align2::LEFT_CENTER, label, font(13.5, "semibold"), fg);
+        let mut frame = self.base_frame(full, ppp, time, nav_w);
+        frame.overlay = true;
+        self.set_frame(ui, slot, full, frame, &els);
+
+        if resp.clicked() {
+            self.sound.click();
+            let added = self.lib.toggle_nd_link(&pl);
+            self.toast(if added { format!("Added {} to your playlists", pl.title) } else { format!("Removed {} from your playlists", pl.title) });
+            // Taken away while open from the sidebar: it's now a plain Navidrome playlist.
+            if !added {
+                if let Some(rv) = self.remote.as_mut().filter(|rv| rv.navidrome && rv.pl.id == pl.id) {
+                    rv.linked = false;
+                }
+            }
+            self.nd_menu = None;
+        } else if ((back.clicked() || back.secondary_clicked()) && !back.interact_pointer_pos().is_some_and(|p| panel.contains(p))) || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.nd_menu = None;
+        }
+    }
+
     /// Runs player actions (from the bar or the mini player).
     pub fn run_actions(&mut self, ctx: &egui::Context, actions: Vec<Action>, track: Option<Track>) {
         for a in actions {
@@ -1386,6 +1594,7 @@ impl eframe::App for Starlite {
             let cpu_ms = frame_info.info().cpu_usage.unwrap_or(0.0) * 1000.0;
             eprintln!("frame dt={dt_ms:.1}ms app+paint={cpu_ms:.2}ms causes={:?}", ctx.repaint_causes());
         }
+        debug_shots(ctx);
         let dt = ctx.input(|i| i.stable_dt).clamp(1.0 / 240.0, 1.0 / 20.0);
         self.time = ctx.input(|i| i.time);
         let time = self.time as f32;
@@ -1439,7 +1648,7 @@ impl eframe::App for Starlite {
         if self.now.is_none() {
             self.fullscreen = false;
         }
-        if self.fullscreen && self.dialog.is_none() && self.popover.is_none() && self.fx_pop.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if self.fullscreen && !self.overlay_open() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.fullscreen = false;
         }
         let fs_target = if self.fullscreen { 1.0 } else { 0.0 };
@@ -1480,6 +1689,17 @@ impl eframe::App for Starlite {
         }
         let nav_w = lerp(NAV_MINI, NAV_FULL, smooth(self.nav_t));
 
+        // The custom theme's picture, read off the UI thread.
+        if theme == Theme::Custom && self.bg_for.as_ref() != Some(&self.custom.image) {
+            let path = self.custom.image.clone();
+            self.bg_for = Some(path.clone());
+            let (tx, c) = (self.jobs_tx.clone(), ctx.clone());
+            std::thread::spawn(move || {
+                let img = path.as_deref().and_then(crate::theme::load_bg_image);
+                let _ = tx.send(Job::BgImage(path, img));
+                c.request_repaint();
+            });
+        }
         if theme == Theme::Cherry && self.tree_ppp != Some(ppp) {
             let img = crate::tree::render(TREE_SIZE[0], TREE_SIZE[1], ppp);
             self.renderer.lock().unwrap().pending_tree = Some(img);
@@ -1602,6 +1822,12 @@ impl eframe::App for Starlite {
             }
             if self.dialog.is_some() {
                 self.draw_dialog(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
+            }
+            if self.nd_menu.is_some() {
+                self.draw_nd_menu(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
+            }
+            if self.color_pick.is_some() {
+                self.draw_color_pick(ui, ppp, dt, full, time, nav_w, &mut animating);
             }
         });
 

@@ -22,7 +22,8 @@ icon_table!(
     "piano", "play", "plus", "radio", "repeat", "repeat-1", "rotate-cw", "settings",
     "skip-back", "skip-forward", "sparkles", "star", "sun", "trash", "volume-1",
     "volume-2", "volume-x", "x", "zap", "minus", "square", "copy", "maximize-2", "minimize-2",
-    "cloudy", "shuffle", "search", "sliders-horizontal",
+    "cloudy", "shuffle", "search", "sliders-horizontal", "bubbles", "palette", "file-music",
+    "list-x",
 );
 
 /// The static name of any bundled icon (covers can use any of them).

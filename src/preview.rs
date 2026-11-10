@@ -25,6 +25,8 @@ pub const LENGTH_MS: u64 = 15_000;
 const FADE_IN: f32 = 0.6;
 const FADE_OUT: f32 = 1.6;
 const STOP_FADE: f32 = 0.25;
+/// How long a preview waits for an online lyrics lookup (to find the chorus).
+const LYRICS_WAIT: Duration = Duration::from_millis(900);
 
 /// What the equalizer reads: each band's loudness (RMS, as f32 bits).
 #[derive(Default)]
@@ -44,7 +46,8 @@ impl Levels {
 }
 
 enum Cmd {
-    Play(u64, Vec<u8>, u64),
+    /// generation, song bytes, start (ms), only part of the song (decode to the start).
+    Play(u64, Vec<u8>, u64, bool),
     Stop,
     Volume(f32),
 }
@@ -78,7 +81,7 @@ impl Preview {
                 let mut latest = 0u64;
                 loop {
                     match rx.recv_timeout(Duration::from_millis(50)) {
-                        Ok(Cmd::Play(g, bytes, start)) => {
+                        Ok(Cmd::Play(g, bytes, start, partial)) => {
                             if g < latest {
                                 continue;
                             }
@@ -87,12 +90,23 @@ impl Preview {
                                 stop.store(true, Ordering::Relaxed);
                                 fading.push((s, Instant::now()));
                             }
+                            // A sound device that failed to open is tried again next time.
+                            if device.as_ref().is_some_and(|d| d.is_err()) {
+                                device = None;
+                            }
                             let dev = device.get_or_insert_with(|| OutputStream::try_default().map_err(|e| e.to_string()));
                             let Ok((_, handle)) = dev.as_ref() else { continue };
                             let Ok(s) = Sink::try_new(handle) else { continue };
-                            let Ok(dec) = Decoder::new(Cursor::new(bytes)) else { continue };
+                            let Ok(mut dec) = Decoder::new(Cursor::new(bytes)) else { continue };
+                            // Get to the start here, not on the sound card's thread
+                            // (decoding a minute of song there made the start stutter).
+                            // A partial download can't be seek-estimated: decode up to the start.
+                            if partial || dec.try_seek(Duration::from_millis(start)).is_err() {
+                                let n = start * dec.sample_rate() as u64 * dec.channels() as u64 / 1000;
+                                let _ = dec.by_ref().take(n as usize).count();
+                            }
                             let stop = Arc::new(AtomicBool::new(false));
-                            let src = dec.convert_samples::<f32>().skip_duration(Duration::from_millis(start)).take_duration(Duration::from_millis(LENGTH_MS));
+                            let src = dec.convert_samples::<f32>().take_duration(Duration::from_millis(LENGTH_MS));
                             s.set_volume(volume);
                             s.append(Tap::new(src, lv.clone(), stop.clone()));
                             s.play();
@@ -142,25 +156,60 @@ impl Preview {
         }
         let (t, tx, gen, starts) = (track.clone(), self.tx.clone(), self.gen.clone(), self.starts.clone());
         std::thread::spawn(move || {
-            let bytes = match (&t.source, &stream) {
-                (Source::File { path }, _) => std::fs::read(path).ok(),
-                (Source::Navidrome { .. }, Some(url)) => crate::audio::fetch(url).ok(),
-                _ => None,
-            };
-            let Some(bytes) = bytes else { return };
-            if gen.load(Ordering::SeqCst) != g {
-                return;
-            }
             let known = starts.lock().unwrap().get(&t.id).copied();
-            let start = known.unwrap_or_else(|| {
-                let s = song_lyrics(&t, online).and_then(|l| highlight_ms(&l)).or_else(|| loudest_ms(&bytes)).unwrap_or(30_000);
-                starts.lock().unwrap().insert(t.id.clone(), s);
-                s
+            // Look the lyrics up alongside the download, but never wait long
+            // for them: a slow lrclib.net used to hold the preview back until
+            // the mouse had already moved on. The lookup still finishes (and
+            // is cached), so the next hover finds the chorus.
+            let lyrics = known.is_none().then(|| {
+                let (ltx, lrx) = channel();
+                let lt = t.clone();
+                std::thread::spawn(move || {
+                    let _ = ltx.send(song_lyrics(&lt, online).and_then(|l| highlight_ms(&l)));
+                });
+                lrx
             });
+            let asked = Instant::now();
+            // The chorus from the lyrics (not waiting long), else `fallback`.
+            // Only a real answer is remembered; a late one is asked again next time.
+            let pick = |fallback: &dyn Fn() -> u64| -> u64 {
+                match (known, &lyrics) {
+                    (Some(s), _) => s,
+                    (None, Some(lrx)) => match lrx.recv_timeout(LYRICS_WAIT.saturating_sub(asked.elapsed())) {
+                        Ok(found) => {
+                            let s = found.unwrap_or_else(fallback);
+                            starts.lock().unwrap().insert(t.id.clone(), s);
+                            s
+                        }
+                        Err(_) => fallback(),
+                    },
+                    (None, None) => fallback(),
+                }
+            };
             // Leave room for the whole preview before the song ends.
-            let start = if t.duration_ms > LENGTH_MS { start.min(t.duration_ms - LENGTH_MS) } else { 0 };
+            let fit = |start: u64| if t.duration_ms > LENGTH_MS { start.min(t.duration_ms - LENGTH_MS) } else { 0 };
+            let (bytes, start, streamed) = match (&t.source, &stream) {
+                (Source::File { path }, _) => {
+                    let Ok(bytes) = std::fs::read(path) else { return };
+                    if gen.load(Ordering::SeqCst) != g {
+                        return;
+                    }
+                    let start = fit(pick(&|| loudest_ms(&bytes).unwrap_or(30_000)));
+                    (bytes, start, false)
+                }
+                (Source::Navidrome { .. }, Some(url)) => {
+                    // Only download up to the end of the preview (the server
+                    // sends 160 kbps MP3: 20 bytes a millisecond), not the
+                    // whole song: on a slow server that took many seconds.
+                    let start = fit(pick(&|| guess_ms(t.duration_ms)));
+                    let need = (start + LENGTH_MS + 3_000) * 20 + 64 * 1024;
+                    let Ok(bytes) = crate::audio::fetch_prefix(url, need) else { return };
+                    (bytes, start, true)
+                }
+                _ => return,
+            };
             if gen.load(Ordering::SeqCst) == g {
-                let _ = tx.send(Cmd::Play(g, bytes, start));
+                let _ = tx.send(Cmd::Play(g, bytes, start, streamed));
             }
         });
     }
@@ -239,6 +288,12 @@ pub fn highlight_ms(ly: &Lyrics) -> Option<u64> {
     let at = best.map(|(_, i)| lines[i].0).unwrap_or(first);
     // Start a breath before the line.
     Some(at.saturating_sub(400))
+}
+
+/// Where a song without timed lyrics probably gets going, when only part of
+/// it is downloaded: about a third in (usually past the intro and verse).
+fn guess_ms(duration_ms: u64) -> u64 {
+    (duration_ms * 3 / 10).clamp(20_000, 75_000)
 }
 
 /// The start of the song's loudest ~10 s (between 10 % and 80 % of it), for
@@ -438,6 +493,51 @@ mod tests {
         let l = levels.get();
         let loudest = (0..BANDS).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap();
         assert_eq!(CENTERS[loudest], 1000.0, "{l:?}");
+    }
+
+    /// Needs a sound device and the internet (lrclib.net):
+    /// STARLITE_PREVIEW_FILE=<audio file> cargo test -- --ignored preview_starts_quickly
+    #[test]
+    #[ignore]
+    fn preview_starts_quickly() {
+        let Ok(f) = std::env::var("STARLITE_PREVIEW_FILE") else { return };
+        let mut t = crate::library::file_track(std::path::Path::new(&f));
+        // A song lrclib.net won't know, so the lookup runs its full course.
+        t.id = format!("test:{}", std::process::id());
+        t.title = format!("Nothing Like This {}", std::process::id());
+        let mut p = Preview::new();
+        p.set_volume(0.0);
+        let at = Instant::now();
+        p.play(&t, None, true);
+        while !p.audible() && at.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let took = at.elapsed();
+        p.stop();
+        eprintln!("preview audible after {took:?}");
+        // What it used to wait for: the whole lookup.
+        t.title = format!("Nothing Like That {}", std::process::id());
+        let at = Instant::now();
+        let _ = crate::lyrics::online(&t);
+        eprintln!("a full lyrics lookup took {:?}", at.elapsed());
+        assert!(took < Duration::from_millis(1600), "{took:?}");
+    }
+
+    /// STARLITE_PREVIEW_FILE=<mp3> cargo test -- --ignored cut_downloads_still_decode
+    #[test]
+    #[ignore]
+    fn cut_downloads_still_decode() {
+        let Ok(f) = std::env::var("STARLITE_PREVIEW_FILE") else { return };
+        let bytes = std::fs::read(f).unwrap();
+        let full = Decoder::new(Cursor::new(bytes.clone())).unwrap();
+        let (rate, ch) = (full.sample_rate() as u64, full.channels() as u64);
+        let total = full.count() as u64;
+        let mut dec = Decoder::new(Cursor::new(bytes[..bytes.len() / 2].to_vec())).unwrap();
+        let skip = (rate * ch * 10) as usize; // 10 s, decoded through like a partial preview
+        assert_eq!(dec.by_ref().take(skip).count(), skip);
+        let rest = dec.count() as u64 + skip as u64;
+        eprintln!("full {total} samples, half the bytes gave {rest}");
+        assert!(rest > total * 2 / 5 && rest < total * 3 / 5, "{rest} of {total}");
     }
 
     #[test]

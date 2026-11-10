@@ -726,7 +726,8 @@ impl Starlite {
         }
 
         // Preview: the case that's out plays a bit of its song.
-        let preview_for = active.filter(|&a| sh.out[a].t > 0.6).map(|a| sh.out[a].track.clone());
+        // Loading starts early in the pull, so the sound is ready about when the disc is out.
+        let preview_for = active.filter(|&a| sh.out[a].t > 0.25).map(|a| sh.out[a].track.clone());
         let stream = preview_for.as_ref().and_then(|t| match &t.source {
             Source::Navidrome { song_id, .. } => self.nd.preview_url(song_id),
             _ => None,

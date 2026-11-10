@@ -9,6 +9,7 @@
 
 use eframe::glow::{self, HasContext};
 
+use crate::theme::BgImage;
 use crate::tree::TreeImage;
 
 pub const MAX_EL: usize = 24;
@@ -25,7 +26,7 @@ out vec4 o;
 uniform vec2  u_res;            // framebuffer size (px)
 uniform float u_ppp;            // pixels per point
 uniform float u_time;
-uniform int   u_theme;          // 0 light, 1 dark, 2 cherry blossom, 3 stars
+uniform int   u_theme;          // 0 light, 1 dark, 2 cherry blossom, 3 stars, 4 bubbles, 5 custom
 uniform int   u_count;
 uniform vec4  u_rect[MAX_EL];   // centre xy, half size zw (px)
 uniform vec4  u_prop[MAX_EL];   // radius px, strength, shadow size pt, kind
@@ -40,12 +41,21 @@ uniform int   u_overlay;        // 1 = overlay pass (dialogs, popovers) over the
 uniform float u_fs;             // 0..1 fullscreen Now Playing (album-colour background)
 uniform vec3  u_pal[4];         // album cover palette
 uniform float u_dim;            // overlay: how much to darken the UI behind
+uniform vec3  u_cbg;            // custom theme: background colour
+uniform vec3  u_accent;         // custom theme: accent colour
+uniform int   u_light_ui;       // custom theme: light background, light glass
+uniform sampler2D u_img;        // custom theme: background picture
+uniform float u_has_img;
+uniform vec2  u_img_size;       // picture size (texels)
 
 float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 float hash2(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
+bool light_ui() { return u_theme == 0 || (u_theme == 5 && u_light_ui == 1); }
+
 vec3 bg_color() {
     if (u_theme == 0) return vec3(0.925, 0.925, 0.932);
+    if (u_theme == 5) return u_cbg;
     if (u_theme == 1) return vec3(0.071, 0.071, 0.078);
     if (u_theme == 3) return vec3(0.006, 0.006, 0.010);
     return vec3(0.010, 0.008, 0.010);
@@ -124,6 +134,106 @@ vec3 stars(vec2 p, float blur) {
     return acc;
 }
 
+vec3 hue(float h) {
+    return clamp(abs(fract(h + vec3(0.0, 2.0 / 3.0, 1.0 / 3.0)) * 6.0 - 3.0) - 1.0, 0.0, 1.0);
+}
+
+// Bubbles: deep blue-black with a faint teal glow along the bottom, where
+// the bubbles come from.
+vec3 bubbles_bg(vec2 p) {
+    vec2 q = p / u_res;
+    vec3 c = vec3(0.014, 0.020, 0.034);
+    float g = exp(-pow((1.0 - q.y) * 2.4, 2.0)) * (0.75 + 0.25 * sin(q.x * 4.0 + u_time * 0.07));
+    return c + vec3(0.006, 0.034, 0.052) * g;
+}
+
+// Liquid-glass bubbles rising from the bottom. Each one pops at its own
+// height and place, then a new one starts somewhere else. A bubble is a
+// clear sphere: a bright, iridescent rim (a thin film, its colours drifting),
+// a soft highlight and almost nothing in the middle. Popping leaves a ring
+// that spreads and a few droplets that fly off.
+vec3 bubbles(vec2 p, float blur) {
+    vec3 c = bubbles_bg(p);
+    for (int i = 0; i < 20; i++) {
+        float f = float(i);
+        float dur = 11.0 + 8.0 * hash1(f * 1.37 + 0.21);
+        float cyc = u_time / dur + hash1(f * 2.91 + 0.7);
+        float n = floor(cyc);
+        float s = fract(cyc) * dur;
+        float k1 = hash1(f * 7.31 + n * 1.13 + 0.5);
+        float k2 = hash1(f * 3.17 + n * 2.71 + 1.9);
+        float k3 = hash1(f * 5.53 + n * 0.37 + 3.3);
+        float r = (8.0 + 30.0 * k1 * k1) * u_ppp;
+        float y0 = u_res.y + r + 6.0 * u_ppp;
+        float y_pop = u_res.y * mix(0.08, 0.74, k2);
+        float rise = dur * (0.60 + 0.28 * k3);
+        float u = min(s / rise, 1.0);
+        vec2 ctr = vec2(u_res.x * (0.04 + 0.92 * hash1(f * 9.7 + n * 4.1 + 2.2)), mix(y0, y_pop, u * (0.55 + 0.45 * u)));
+        ctr.x += sin(s * (1.1 + k1) + f) * (3.0 + 7.0 * k3) * u_ppp;
+        float pop = s - rise;
+        vec2 d = p - ctr;
+        float reach = r * 2.6 + blur * 2.0 + 4.0 * u_ppp;
+        if (abs(d.x) > reach || abs(d.y) > reach) continue;
+        float soft = 1.0 + blur * 0.7;
+        float energy = (r * r) / ((r + blur * 0.5) * (r + blur * 0.5));
+        if (pop < 0.0) {
+            // Wobbles a little as it rises.
+            float w = 0.035 * sin(s * 3.1 + f * 1.7);
+            vec2 e = d / vec2(1.0 + w, 1.0 - w);
+            float dist = length(e);
+            if (dist > r + soft * 2.0) continue;
+            float nd = clamp(dist / r, 0.0, 1.0);
+            float cov = 1.0 - smoothstep(r - soft, r + soft, dist);
+            float film = 0.5 + 0.5 * sin(e.y / r * 3.0 + e.x / r * 1.7 + u_time * 0.8 + f * 2.3);
+            vec3 iri = mix(vec3(0.86, 0.94, 1.0), hue(fract(0.52 + 0.5 * film + nd * 0.3)), 0.38);
+            float rim = pow(nd, 6.0) * 0.8 + pow(nd, 2.0) * 0.05;
+            // A crisp glassy edge, brightest towards the light (top left).
+            float lit = 0.55 + 0.45 * dot(normalize(e + 1e-4), vec2(-0.7, -0.7));
+            float edge = exp(-pow((r - dist) / (0.9 * u_ppp + blur * 0.6), 2.0)) * 0.35 * lit;
+            vec2 h1 = e / r - vec2(-0.36, -0.42);
+            vec2 h2 = e / r - vec2(0.38, 0.40);
+            float spec = exp(-dot(h1, h1) * 24.0) * 0.75 + exp(-dot(h2, h2) * 46.0) * 0.18;
+            c += (iri * (0.025 + rim) + vec3(spec + edge)) * cov * energy;
+        } else if (pop < 0.5) {
+            float a = 1.0 - pop / 0.5;
+            float dist = length(d);
+            // A thin ring that spreads and fades.
+            float rr = r * (1.0 + 1.6 * pop / 0.5);
+            float ring = exp(-pow((dist - rr) / (0.8 * u_ppp + blur * 0.5 + 0.06 * r * (1.0 - a)), 2.0));
+            c += mix(vec3(0.85, 0.93, 1.0), hue(fract(0.55 + f * 0.13)), 0.4) * ring * a * a * 0.55 * energy;
+            // Droplets flying off (falling a little).
+            for (int j = 0; j < 7; j++) {
+                float ang = float(j) * 0.8976 + k1 * 6.2832;
+                float dd = r * (1.0 + 2.4 * (pop / 0.5) * (0.7 + 0.3 * hash1(f + float(j))));
+                vec2 dp = ctr + vec2(cos(ang), sin(ang)) * dd + vec2(0.0, 90.0 * pop * pop * u_ppp);
+                float ds = (1.3 + 0.9 * hash1(f * 3.0 + float(j))) * u_ppp + blur * 0.4;
+                vec2 q = p - dp;
+                c += vec3(0.80, 0.90, 1.0) * exp(-dot(q, q) / (ds * ds)) * a * 0.7 * energy;
+            }
+        }
+    }
+    return c;
+}
+
+// Custom theme: the picked colour, or the picked picture (filling the
+// window) with a touch of that colour. Under frosted glass it's blurred.
+vec3 custom_bg(vec2 p, float blur) {
+    if (u_has_img < 0.5) return u_cbg;
+    float sc = max(u_res.x / u_img_size.x, u_res.y / u_img_size.y);
+    vec2 uv = ((p - u_res * 0.5) / sc + u_img_size * 0.5) / u_img_size;
+    vec3 im;
+    if (blur > 0.5) {
+        float lod = log2(max(blur / sc, 1.0)) + 1.0;
+        vec2 o = vec2(blur / sc * 0.6) / u_img_size;
+        im = (textureLod(u_img, uv, lod).rgb * 2.0
+            + textureLod(u_img, uv + o, lod).rgb + textureLod(u_img, uv - o, lod).rgb
+            + textureLod(u_img, uv + vec2(o.x, -o.y), lod).rgb + textureLod(u_img, uv + vec2(-o.x, o.y), lod).rgb) / 6.0;
+    } else {
+        im = texture(u_img, uv).rgb;
+    }
+    return mix(im, u_cbg, 0.22);
+}
+
 vec4 tree(vec2 p, float blur) {
     vec2 uv = (p - u_tree_rect.xy) / u_tree_rect.zw;
     if (u_has_tree < 0.5 || any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return vec4(0.0);
@@ -164,6 +274,10 @@ vec3 backdrop(vec2 p, float blur) {
         c = c * (1.0 - q.a) + q.rgb;
     } else if (u_theme == 3) {
         c += stars(p, blur);
+    } else if (u_theme == 4) {
+        c = bubbles(p, blur);
+    } else if (u_theme == 5) {
+        c = custom_bg(p, blur);
     }
     return c;
 }
@@ -184,9 +298,10 @@ vec3 track(vec3 col, vec2 p, int i) {
     float cov = clamp(0.5 - d, 0.0, 1.0);
     if (cov <= 0.0) return col;
     float fill_x = R.x - R.z + 2.0 * R.z * u_fx[i].z;
-    vec3 on = u_theme == 0 ? vec3(0.20, 0.20, 0.23)
-            : (u_theme == 2 ? vec3(1.0, 0.74, 0.81) : vec3(0.93));
-    vec3 off = u_theme == 0 ? mix(col, vec3(0.55), 0.35) : mix(col, vec3(1.0), 0.16);
+    vec3 on = u_theme == 5 ? u_accent
+            : (light_ui() ? vec3(0.20, 0.20, 0.23)
+            : (u_theme == 2 ? vec3(1.0, 0.74, 0.81) : (u_theme == 4 ? vec3(0.78, 0.92, 1.0) : vec3(0.93))));
+    vec3 off = light_ui() ? mix(col, vec3(0.55), 0.35) : mix(col, vec3(1.0), 0.16);
     vec3 c = mix(off, on, clamp(fill_x - p.x + 0.5, 0.0, 1.0));
     return mix(col, c, cov);
 }
@@ -199,7 +314,7 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, vec3 pre_track, int tr) {
     float rad = P.x, s = P.y, sh = P.z;
     float glow = u_fx[i].x, press = u_fx[i].y, value = u_fx[i].z;
     if (s <= 0.001) return col;
-    bool light = u_theme == 0;
+    bool light = light_ui();
 
     float d = sdf(p, R, rad);
     if (d > sh * 7.0 * u_ppp + 4.0) return col;   // far outside: untouched
@@ -277,11 +392,12 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, vec3 pre_track, int tr) {
     if (fill >= 0.0) {
         float fx = R.x - R.z + 2.0 * R.z * fill;
         float f = clamp(fx - p.x + 0.5, 0.0, 1.0);
-        vec3 tint = u_theme == 0 ? c * 0.93 : (u_theme == 2 ? mix(c, vec3(1.0, 0.72, 0.80), 0.16) : c + vec3(0.065));
+        vec3 tint = u_theme == 5 ? mix(c, u_accent, 0.18)
+                  : (light_ui() ? c * 0.93 : (u_theme == 2 ? mix(c, vec3(1.0, 0.72, 0.80), 0.16) : c + vec3(0.065)));
         c = mix(c, tint, f);
         // Bright playhead line.
         float head = exp(-abs(p.x - fx) / (1.1 * u_ppp)) * smoothstep(5.0 * u_ppp, 10.0 * u_ppp, -d) * step(0.002, fill) * step(fill, 0.998);
-        c += head * (u_theme == 0 ? 0.0 : 0.35) - head * (u_theme == 0 ? 0.25 : 0.0);
+        c += head * (light_ui() ? 0.0 : 0.35) - head * (light_ui() ? 0.25 : 0.0);
     }
     return mix(shadowed, clamp(c, 0.0, 1.0), cov * min(s, 1.0));
 }
@@ -302,7 +418,7 @@ void main() {
         float d0 = sdf(p, u_rect[0], u_prop[0].x);
         float cov0 = clamp(0.5 - d0, 0.0, 1.0);
         float ds = sdf(p - vec2(0.0, 8.0 * u_ppp), u_rect[0], u_prop[0].x);
-        float sh = (u_theme == 0 ? 0.16 : 0.45) * exp(-max(ds, 0.0) / (16.0 * u_ppp));
+        float sh = (light_ui() ? 0.16 : 0.45) * exp(-max(ds, 0.0) / (16.0 * u_ppp));
         float a_out = 1.0 - (1.0 - u_dim) * (1.0 - sh);
         col += (hash2(p) - 0.5) / 255.0;
         o = vec4(clamp(col, 0.0, 1.0) * cov0, cov0 + (1.0 - cov0) * a_out);
@@ -403,6 +519,10 @@ pub struct Frame {
     /// Fullscreen Now Playing amount and the album palette for its background.
     pub fs: f32,
     pub palette: [[f32; 3]; 4],
+    /// Custom theme: background and accent colours (0..1), light UI.
+    pub custom_bg: [f32; 3],
+    pub accent: [f32; 3],
+    pub light_ui: bool,
 }
 
 pub struct GlassRenderer {
@@ -412,6 +532,11 @@ pub struct GlassRenderer {
     tree_blur_tex: glow::Texture,
     has_tree: bool,
     pub pending_tree: Option<TreeImage>,
+    bg_tex: glow::Texture,
+    /// Size of the custom theme's picture, when there is one.
+    bg_size: Option<[f32; 2]>,
+    /// A new picture for the custom theme (`Some(None)` removes it).
+    pub pending_bg: Option<Option<BgImage>>,
 }
 
 unsafe fn compile(gl: &glow::Context, kind: u32, src: &str) -> glow::Shader {
@@ -448,7 +573,9 @@ impl GlassRenderer {
             };
             let tree_tex = make_tex();
             let tree_blur_tex = make_tex();
-            Self { program, vao, tree_tex, tree_blur_tex, has_tree: false, pending_tree: None }
+            let bg_tex = make_tex();
+            gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR_MIPMAP_LINEAR as i32);
+            Self { program, vao, tree_tex, tree_blur_tex, has_tree: false, pending_tree: None, bg_tex, bg_size: None, pending_bg: None }
         }
     }
 
@@ -458,6 +585,7 @@ impl GlassRenderer {
             gl.delete_vertex_array(self.vao);
             gl.delete_texture(self.tree_tex);
             gl.delete_texture(self.tree_blur_tex);
+            gl.delete_texture(self.bg_tex);
         }
     }
 
@@ -481,6 +609,27 @@ impl GlassRenderer {
                 }
                 self.has_tree = true;
             }
+            if let Some(bg) = self.pending_bg.take() {
+                self.bg_size = None;
+                if let Some(img) = bg {
+                    gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 4);
+                    gl.bind_texture(glow::TEXTURE_2D, Some(self.bg_tex));
+                    gl.tex_image_2d(
+                        glow::TEXTURE_2D,
+                        0,
+                        glow::RGBA8 as i32,
+                        img.width as i32,
+                        img.height as i32,
+                        0,
+                        glow::RGBA,
+                        glow::UNSIGNED_BYTE,
+                        glow::PixelUnpackData::Slice(Some(&img.rgba)),
+                    );
+                    // Smaller copies: what frosted glass shows of the picture.
+                    gl.generate_mipmap(glow::TEXTURE_2D);
+                    self.bg_size = Some([img.width as f32, img.height as f32]);
+                }
+            }
 
             if f.overlay {
                 gl.enable(glow::BLEND);
@@ -493,6 +642,8 @@ impl GlassRenderer {
             gl.viewport(0, 0, f.res[0] as i32, f.res[1] as i32);
             gl.use_program(Some(self.program));
             gl.bind_vertex_array(Some(self.vao));
+            gl.active_texture(glow::TEXTURE2);
+            gl.bind_texture(glow::TEXTURE_2D, Some(self.bg_tex));
             gl.active_texture(glow::TEXTURE1);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.tree_blur_tex));
             gl.active_texture(glow::TEXTURE0);
@@ -502,6 +653,13 @@ impl GlassRenderer {
             let loc = |n: &str| gl.get_uniform_location(p, n);
             gl.uniform_1_i32(loc("u_tree").as_ref(), 0);
             gl.uniform_1_i32(loc("u_tree_blur").as_ref(), 1);
+            gl.uniform_1_i32(loc("u_img").as_ref(), 2);
+            gl.uniform_1_f32(loc("u_has_img").as_ref(), if self.bg_size.is_some() { 1.0 } else { 0.0 });
+            let is = self.bg_size.unwrap_or([1.0, 1.0]);
+            gl.uniform_2_f32(loc("u_img_size").as_ref(), is[0], is[1]);
+            gl.uniform_3_f32(loc("u_cbg").as_ref(), f.custom_bg[0], f.custom_bg[1], f.custom_bg[2]);
+            gl.uniform_3_f32(loc("u_accent").as_ref(), f.accent[0], f.accent[1], f.accent[2]);
+            gl.uniform_1_i32(loc("u_light_ui").as_ref(), f.light_ui as i32);
             gl.uniform_2_f32(loc("u_res").as_ref(), f.res[0], f.res[1]);
             gl.uniform_1_f32(loc("u_ppp").as_ref(), f.ppp);
             gl.uniform_1_f32(loc("u_time").as_ref(), f.time);

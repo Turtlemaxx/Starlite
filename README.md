@@ -32,7 +32,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 <p align="center"><img src="docs/screenshots/mini-player.png" width="357" alt="Mini player"></p>
 
-**Navidrome.** Connect your Navidrome (or any Subsonic) server and play its playlists. Only a login token is saved, never your password.
+**Navidrome.** Connect your Navidrome (or any Subsonic) server and play its playlists. Right-click one to add it to your playlists in the sidebar. Only a login token is saved, never your password.
 
 <p align="center"><img src="docs/screenshots/navidrome.png" width="720" alt="Navidrome playlists"></p>
 
@@ -40,11 +40,13 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 <p align="center"><img src="docs/screenshots/settings-discord.png" width="720" alt="Discord settings"></p>
 
-**And also:** your own playlists, Liked Music, local files with their real tags and covers, optional YouTube Music charts (played in YouTube's official player), shuffle, loop, and four themes: Dark, Light, Cherry Blossom and Stars.
+**Themes.** Dark, Light, Cherry Blossom, Stars, Bubbles (liquid-glass bubbles that rise and pop), or your own: pick the background, accent and text colours and add a background picture.
+
+**And also:** your own playlists (start one from an .m3u file if you like), Liked Music, local files with their real tags and covers, optional YouTube Music charts (played in YouTube's official player), shuffle and loop.
 
 ## Install
 
-1. Download `Starlite-0.2.0-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
+1. Download `Starlite-0.2.1-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
 2. Unzip it anywhere and run `Starlite.exe`.
 
 Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, which Windows 11 already has.

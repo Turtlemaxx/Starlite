@@ -3,6 +3,7 @@
 mod app;
 mod audio;
 mod blur;
+mod customize;
 mod discord;
 mod fx;
 mod fxpanel;
@@ -11,6 +12,7 @@ mod icons;
 mod library;
 mod logo;
 mod lyrics;
+mod m3u;
 mod meta;
 mod mini;
 mod navidrome;

@@ -92,7 +92,7 @@ fn low_shelf(db: f32, f0: f32, rate: f32) -> Coefs {
     }
 }
 
-/// Soft limit: untouched below 0.85, eased into Â±1 above.
+/// Soft limit: untouched below 0.85, eased into ±1 above.
 fn soft_clip(x: f32) -> f32 {
     let a = x.abs();
     if a <= 0.85 {

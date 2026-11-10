@@ -267,6 +267,11 @@ impl Audio {
 
 /// Downloads a streamed song (up to 1 GB) into memory.
 pub fn fetch(url: &str) -> Result<Vec<u8>, String> {
+    fetch_prefix(url, 1 << 30)
+}
+
+/// Downloads the first `max` bytes of a streamed song.
+pub fn fetch_prefix(url: &str, max: u64) -> Result<Vec<u8>, String> {
     let resp = ureq::get(url).timeout(Duration::from_secs(120)).call().map_err(|e| match e {
         ureq::Error::Status(code, _) => format!("The server couldn't send this song (error {code})"),
         ureq::Error::Transport(t) => format!("Can't reach the server ({})", t.kind()),
@@ -275,6 +280,6 @@ pub fn fetch(url: &str) -> Result<Vec<u8>, String> {
         return Err("The server couldn't send this song".into());
     }
     let mut buf = Vec::new();
-    std::io::Read::read_to_end(&mut std::io::Read::take(resp.into_reader(), 1 << 30), &mut buf).map_err(|e| format!("Download failed: {e}"))?;
+    std::io::Read::read_to_end(&mut std::io::Read::take(resp.into_reader(), max), &mut buf).map_err(|e| format!("Download failed: {e}"))?;
     Ok(buf)
 }

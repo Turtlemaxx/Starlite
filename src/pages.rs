@@ -149,6 +149,8 @@ impl Starlite {
         let cw = (inner.width() - gap * (cols - 1.0)) / cols;
         let ch = cw + 48.0;
         let mut open = None;
+        let mut menu = None;
+        let linked: Vec<String> = self.lib.nd_links.iter().map(|l| l.id.clone()).collect();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
         child.set_clip_rect(inner.expand(10.0).intersect(area.shrink(2.0)));
         egui::ScrollArea::vertical().id_salt("nd_grid").auto_shrink([false, false]).show(&mut child, |ui| {
@@ -161,6 +163,7 @@ impl Starlite {
                     continue;
                 }
                 let resp = ui.interact(card, Id::new(("nd_pl", &pl.id)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                let resp = if linked.contains(&pl.id) { resp.on_hover_text("In your playlists (right-click to remove)") } else { resp.on_hover_text("Right-click to add it to your playlists") };
                 let h = ui.ctx().animate_bool_with_time(Id::new(("nd_pl_h", &pl.id)), resp.hovered(), 0.15);
                 if h > 0.0 {
                     let c = if theme.is_light() { Color32::from_black_alpha((14.0 * h) as u8) } else { Color32::from_white_alpha((14.0 * h) as u8) };
@@ -174,11 +177,18 @@ impl Starlite {
                 if resp.clicked() {
                     open = Some(pl.clone());
                 }
+                if resp.secondary_clicked() {
+                    menu = resp.interact_pointer_pos().map(|at| (pl.clone(), at));
+                }
             }
         });
         if let Some(pl) = open {
             self.sound.click();
-            self.open_nd_playlist(&ctx, pl);
+            self.open_nd_playlist(&ctx, pl, false);
+        }
+        if let Some((pl, at)) = menu {
+            self.sound.click();
+            self.nd_menu = Some(crate::app::NdMenu { at, pl, open_t: 0.0 });
         }
     }
 
@@ -287,7 +297,7 @@ impl Starlite {
             return;
         };
         let sub = format!("{} song{}", tracks.len(), if tracks.len() == 1 { "" } else { "s" });
-        self.playlist_page(ui, icons, els, ppp, content, kind, &title, &sub, header, &tracks, false, None, None);
+        self.playlist_page(ui, icons, els, ppp, content, kind, &title, &sub, header, &tracks, false, None, None, false);
     }
 
     fn yt_playlist_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect, animating: &mut bool) {
@@ -297,6 +307,7 @@ impl Starlite {
         };
         let pl = v.pl.clone();
         let from_nd = v.navidrome;
+        let back = v.navidrome && !v.linked;
         let (tracks, loading, error) = match &v.tracks {
             None => (Vec::new(), true, None),
             Some(Ok(t)) => (t.clone(), false, None),
@@ -307,7 +318,7 @@ impl Starlite {
         }
         let src = if from_nd { "Navidrome" } else { "YouTube" };
         let sub = if pl.track_count > 0 { format!("by {} · {} songs · {src}", pl.artist, pl.track_count) } else { format!("by {} · {src}", pl.artist) };
-        self.playlist_page(ui, icons, els, ppp, content, PlKind::Remote, &pl.title, &sub, Header::Url(pl.artwork.clone()), &tracks, loading, error, pl.permalink.clone());
+        self.playlist_page(ui, icons, els, ppp, content, PlKind::Remote, &pl.title, &sub, Header::Url(pl.artwork.clone()), &tracks, loading, error, pl.permalink.clone(), back);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -326,13 +337,24 @@ impl Starlite {
         loading: bool,
         error: Option<String>,
         link: Option<String>,
+        back: bool,
     ) {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
 
+        // Back to the server's playlists (a Navidrome playlist opened from there).
+        if back {
+            let c = pos2(content.left() + 19.0, 28.0 + 19.0);
+            if icon_button(ui, icons, els, ppp, Id::new("pl_back"), c, 38.0, "chevron-left", true, false, theme).on_hover_text("Back to Navidrome").clicked() {
+                self.sound.click();
+                self.view = View::Navidrome;
+                return;
+            }
+        }
+
         // Header: cover, name, count, actions.
-        let art = Rect::from_min_size(pos2(content.left(), 28.0), Vec2::splat(120.0));
+        let art = Rect::from_min_size(pos2(content.left() + if back { 54.0 } else { 0.0 }, 28.0), Vec2::splat(120.0));
         match &header {
             Header::Local(c) => playlist_cover(ui, icons, art, c, 18.0, theme),
             Header::Url(u) => cover(ui, icons, art, u.as_deref(), 18.0, "disc-3", theme),
@@ -596,12 +618,15 @@ impl Starlite {
             0 => {
                 // Appearance.
                 let gap = 14.0;
-                let n = Theme::ALL.len() as f32;
-                let bw = ((content.width() - gap * (n - 1.0)) / n).clamp(120.0, 176.0);
-                let bh = 100.0;
+                let n = Theme::ALL.len();
+                // One row when they fit, else two.
+                let cols = if content.width() >= n as f32 * 116.0 + (n - 1) as f32 * gap { n } else { n.div_ceil(2) };
+                let bw = ((content.width() - gap * (cols as f32 - 1.0)) / cols as f32).clamp(110.0, 176.0);
+                let bh = if cols == n { 100.0 } else { 84.0 };
                 let mut clicked_theme = None;
                 for (i, t) in Theme::ALL.into_iter().enumerate() {
-                    let base = Rect::from_min_size(pos2(x0 + i as f32 * (bw + gap), top), vec2(bw, bh));
+                    let (c, r) = (i % cols, i / cols);
+                    let base = Rect::from_min_size(pos2(x0 + c as f32 * (bw + gap), top + r as f32 * (bh + gap)), vec2(bw, bh));
                     let id = Id::new(("theme", t.label()));
                     let resp = ui.interact(base, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
                     let h = ctx.animate_bool_with_time(id.with("h"), resp.hovered(), 0.16);
@@ -610,7 +635,7 @@ impl Starlite {
                     let r = Rect::from_center_size(base.center() - vec2(0.0, 2.0 * h), base.size() + Vec2::splat(6.0 * pr));
                     els.push(El::rect(r, ppp, 20.0, 1.0, 8.0 + 4.0 * h, Kind::Glass, if selected { 0.35 } else { 0.0 } + 0.5 * h, pr));
                     icons.paint(ui, t.icon(), r.min + vec2(28.0, 28.0), 22.0, if selected { theme.accent() } else { theme.text() });
-                    p.text(r.left_bottom() + vec2(16.0, -24.0), Align2::LEFT_CENTER, t.label(), font(14.5, "semibold"), theme.text());
+                    p.text(r.left_bottom() + vec2(16.0, -22.0), Align2::LEFT_CENTER, t.label(), font(14.5, "semibold"), theme.text());
                     if selected {
                         icons.paint(ui, "check", r.right_top() + vec2(-24.0, 24.0), 16.0, theme.accent());
                     }
@@ -624,8 +649,13 @@ impl Starlite {
                     t.save();
                     self.apply_theme(&ctx);
                 }
+                let rows = n.div_ceil(cols) as f32;
+                let mut y = top + rows * bh + (rows - 1.0) * gap + 22.0;
+                if self.theme == Theme::Custom {
+                    y = self.custom_theme_settings(ui, icons, els, ppp, x0, y, content.width().min(540.0)) + 24.0;
+                }
                 let mut on = self.shelf.prefs.enabled;
-                let r = Rect::from_min_size(pos2(x0, top + bh + 28.0), vec2(content.width().min(520.0), 52.0));
+                let r = Rect::from_min_size(pos2(x0, y), vec2(content.width().min(520.0), 52.0));
                 if toggle_row(ui, r, Id::new("shelf_on"), "CD shelf", Some("Shows playlists as CD cases on a bookshelf"), &mut on, theme) {
                     self.sound.click();
                     self.shelf.prefs.enabled = on;
@@ -826,11 +856,7 @@ impl Starlite {
 }
 
 fn theme_bg(theme: Theme) -> Color32 {
-    match theme {
-        Theme::Light => Color32::from_rgb(240, 240, 242),
-        Theme::Dark => Color32::from_rgb(26, 26, 28),
-        _ => Color32::from_rgb(14, 12, 14),
-    }
+    theme.background()
 }
 
 /// A glass bubble holding a horizontally scrolling row of cards.

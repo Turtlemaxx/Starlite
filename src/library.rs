@@ -70,9 +70,35 @@ pub struct Playlist {
     pub fixed: bool,
 }
 
+/// A Navidrome playlist added to your playlists in the sidebar. Only the
+/// link is kept: its songs load from the server when you open it.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct NdLink {
+    pub id: String,
+    pub title: String,
+    #[serde(default)]
+    pub owner: String,
+    #[serde(default)]
+    pub artwork: Option<String>,
+    #[serde(default)]
+    pub track_count: u64,
+}
+
+impl NdLink {
+    pub fn from_remote(p: &crate::youtube::RemotePlaylist) -> NdLink {
+        NdLink { id: p.id.clone(), title: p.title.clone(), owner: p.artist.clone(), artwork: p.artwork.clone(), track_count: p.track_count }
+    }
+    pub fn to_remote(&self) -> crate::youtube::RemotePlaylist {
+        crate::youtube::RemotePlaylist { id: self.id.clone(), title: self.title.clone(), artist: self.owner.clone(), artwork: self.artwork.clone(), permalink: None, track_count: self.track_count }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct Library {
     pub playlists: Vec<Playlist>,
+    /// Navidrome playlists shown with your own.
+    #[serde(default)]
+    pub nd_links: Vec<NdLink>,
     #[serde(skip)]
     pub downloaded: Vec<Track>,
 }
@@ -256,6 +282,54 @@ impl Library {
         p.tracks.push(t.clone());
         self.save();
         true
+    }
+
+    /// Adds songs (skipping ones already there); how many were added.
+    pub fn add_many(&mut self, id: &str, tracks: &[Track]) -> usize {
+        let Some(p) = self.playlists.iter_mut().find(|p| p.id == id) else { return 0 };
+        let mut n = 0;
+        for t in tracks {
+            if !p.tracks.iter().any(|x| x.id == t.id) {
+                p.tracks.push(t.clone());
+                n += 1;
+            }
+        }
+        self.save();
+        n
+    }
+
+    pub fn nd_link(&self, id: &str) -> Option<&NdLink> {
+        self.nd_links.iter().find(|l| l.id == id)
+    }
+
+    /// Adds a Navidrome playlist to your playlists, or takes it away again.
+    pub fn toggle_nd_link(&mut self, p: &crate::youtube::RemotePlaylist) -> bool {
+        let added = if let Some(i) = self.nd_links.iter().position(|l| l.id == p.id) {
+            self.nd_links.remove(i);
+            false
+        } else {
+            self.nd_links.push(NdLink::from_remote(p));
+            true
+        };
+        self.save();
+        added
+    }
+
+    /// Keeps linked playlists' names, covers and counts up to date.
+    pub fn refresh_nd_links(&mut self, server: &[crate::youtube::RemotePlaylist]) {
+        let mut changed = false;
+        for l in &mut self.nd_links {
+            if let Some(p) = server.iter().find(|p| p.id == l.id) {
+                let fresh = NdLink::from_remote(p);
+                if *l != fresh {
+                    *l = fresh;
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            self.save();
+        }
     }
 
     pub fn remove_from(&mut self, id: &str, track_id: &str) {
