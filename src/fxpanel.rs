@@ -56,7 +56,7 @@ impl Starlite {
         let ot = smooth(pop.open_t);
         let back = ui.interact(full, ui.id().with("fx_back"), Sense::click());
 
-        let (w, h) = (300.0, 168.0);
+        let (w, h) = (300.0, 202.0);
         let max_x = self.card.map(|c| c.left() - w - 10.0).unwrap_or(full.right() - w - 10.0).max(nav_w + 10.0);
         let panel = Rect::from_min_size(pos2((pop.anchor.x - w * 0.5).clamp(nav_w + 10.0, max_x), pop.anchor.y - 30.0 - h + 10.0 * (1.0 - ot)), vec2(w, h));
         let els = vec![El::rect(panel, ppp, 20.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0)];
@@ -130,11 +130,29 @@ impl Starlite {
             }
         }
 
+        // On to the equalizer and the effects (in Settings).
+        let link = Rect::from_min_max(pos2(panel.left() + 12.0, panel.bottom() - 44.0), pos2(panel.right() - 12.0, panel.bottom() - 10.0));
+        let lresp = ui.interact(link, Id::new("fx_more"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+        let lh = ctx.animate_bool_with_time(Id::new("fx_more_h"), lresp.hovered(), 0.14);
+        p.line_segment([pos2(panel.left() + 22.0, link.top() - 2.0), pos2(panel.right() - 22.0, link.top() - 2.0)], Stroke::new(1.0_f32, dim.gamma_multiply(0.3)));
+        p.text(pos2(panel.left() + 22.0, link.center().y), Align2::LEFT_CENTER, "Equalizer and effects", font(13.0, "semibold"), lerp_c(dim, fg, lh));
+        p.text(pos2(panel.right() - 22.0, link.center().y - 1.0), Align2::RIGHT_CENTER, "›", font(17.0, "semibold"), lerp_c(dim, fg, lh));
+        let more = lresp.clicked();
+
         let mut frame = self.base_frame(full, ppp, time, nav_w);
         frame.overlay = true;
         self.set_frame(ui, slot, full, frame, &els);
 
         // Apply.
+        if more {
+            self.sound.click();
+            self.fx.save();
+            self.fx_pop = None;
+            self.fullscreen = false;
+            self.view = crate::app::View::Settings;
+            self.settings_tab = 2;
+            return;
+        }
         if (values[0] - self.fx.speed).abs() > 1e-4 {
             self.fx.speed = values[0];
             self.audio.set_speed(values[0]);
@@ -143,8 +161,10 @@ impl Starlite {
             }
         }
         if (values[1] - self.fx.bass).abs() > 1e-4 {
+            // The quick slider is the Bass effect: away from zero switches it on.
             self.fx.bass = values[1];
-            self.audio.bass.set(values[1]);
+            self.fx.bass_on = values[1].abs() > 0.01;
+            self.audio.set_fx(&self.fx);
         }
         let now = ctx.input(|i| i.time);
         if let (Some(&t), Some(pop)) = (ticks.last(), self.fx_pop.as_mut()) {

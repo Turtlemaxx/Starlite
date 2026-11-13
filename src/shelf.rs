@@ -730,6 +730,7 @@ impl Starlite {
         let preview_for = active.filter(|&a| sh.out[a].t > 0.25).map(|a| sh.out[a].track.clone());
         let stream = preview_for.as_ref().and_then(|t| match &t.source {
             Source::Navidrome { song_id, .. } => self.nd.preview_url(song_id),
+            Source::Jellyfin { item_id } => self.jf.preview_url(item_id),
             _ => None,
         });
         let sh = &mut self.shelf;

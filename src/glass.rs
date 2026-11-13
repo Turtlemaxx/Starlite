@@ -1,11 +1,14 @@
-//! In-app Liquid Glass renderer. One full-window fragment shader draws the
-//! theme background (plain light / plain dark / black with a sakura tree and
-//! falling petals) and then up to MAX_EL glass elements on top of it: the nav
-//! bar, the nav pills and page buttons. egui draws text and icons above.
+//! The renderer for the window's background and panels. One full-window
+//! fragment shader draws the theme background (plain, a sakura tree with
+//! falling petals, stars, bubbles, or the Custom theme's colour / picture)
+//! and then up to MAX_EL elements on top of it: the nav bar, pills, panels
+//! and buttons. egui draws text and icons above.
 //!
-//! Glass elements that sit directly on the background refract it (lensing
-//! with chromatic dispersion) and frost it; elements stacked on other glass
-//! (nav pills) layer over what is already there.
+//! Elements come in two looks. The simple one (the default) is flat: a
+//! slightly see-through fill, a hairline and a small shadow, blurring what's
+//! behind a little. Liquid glass (Settings → Appearance) refracts the
+//! background (lensing with chromatic dispersion) and frosts it; glass
+//! stacked on other glass (nav pills) layers over what is already there.
 
 use eframe::glow::{self, HasContext};
 
@@ -47,6 +50,11 @@ uniform int   u_light_ui;       // custom theme: light background, light glass
 uniform sampler2D u_img;        // custom theme: background picture
 uniform float u_has_img;
 uniform vec2  u_img_size;       // picture size (texels)
+uniform int   u_flat;           // 1: simple flat panels instead of liquid glass
+uniform vec4  u_cls[3];         // fill of panels / the sidebar / the player bar (a < 0: the look's own)
+uniform vec4  u_edge;           // flat: hairline round panels (a < 0: the look's own)
+uniform float u_round;          // largest corner radius of panels, px (pills and circles stay round)
+uniform float u_frost;          // how far panels blur what's behind them, px
 
 float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 float hash2(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
@@ -54,9 +62,10 @@ float hash2(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.54
 bool light_ui() { return u_theme == 0 || (u_theme == 5 && u_light_ui == 1); }
 
 vec3 bg_color() {
-    if (u_theme == 0) return vec3(0.925, 0.925, 0.932);
+    // The simple look uses the greys of an ordinary desktop app.
+    if (u_theme == 0) return u_flat == 1 ? vec3(0.953, 0.953, 0.961) : vec3(0.925, 0.925, 0.932);
     if (u_theme == 5) return u_cbg;
-    if (u_theme == 1) return vec3(0.071, 0.071, 0.078);
+    if (u_theme == 1) return u_flat == 1 ? vec3(0.110, 0.110, 0.118) : vec3(0.071, 0.071, 0.078);
     if (u_theme == 3) return vec3(0.006, 0.006, 0.010);
     return vec3(0.010, 0.008, 0.010);
 }
@@ -306,12 +315,88 @@ vec3 track(vec3 col, vec2 p, int i) {
     return mix(col, c, cov);
 }
 
-// kind: 0 glass on the background (refracts it), 1 glass stacked on glass,
-// 3 lens (stacked glass that magnifies the volume track under it).
-vec3 layer(vec3 col, vec2 p, int i, int kind, vec3 pre_track, int tr) {
+// An element's corner radius: panels can be capped (pills and circles stay round).
+float radius_of(int i) {
+    vec4 R = u_rect[i];
+    float rad = u_prop[i].x;
+    return rad >= min(R.z, R.w) - 0.5 ? rad : min(rad, u_round);
+}
+
+// Progress fill (the player bar doubles as the seek bar).
+vec3 progress(vec3 c, vec2 p, int i, float d) {
+    vec4 R = u_rect[i];
+    float fill = u_fx[i].w;
+    if (fill < 0.0) return c;
+    float fx = R.x - R.z + 2.0 * R.z * fill;
+    float f = clamp(fx - p.x + 0.5, 0.0, 1.0);
+    vec3 tint = u_theme == 5 ? mix(c, u_accent, 0.18)
+              : (light_ui() ? c * 0.93 : (u_theme == 2 ? mix(c, vec3(1.0, 0.72, 0.80), 0.16) : c + vec3(0.065)));
+    c = mix(c, tint, f);
+    // Bright playhead line.
+    float head = exp(-abs(p.x - fx) / (1.1 * u_ppp)) * smoothstep(5.0 * u_ppp, 10.0 * u_ppp, -d) * step(0.002, fill) * step(fill, 0.998);
+    return c + head * (light_ui() ? 0.0 : 0.35) - head * (light_ui() ? 0.25 : 0.0);
+}
+
+// The simple look: flat, slightly see-through panels with a hairline and a
+// small soft shadow. No bending, no reflections. Panels still blur what's
+// behind them a little, so pictures and moving backgrounds stay calm.
+vec3 flat_layer(vec3 col, vec2 p, int i, int kind, int cls, bool over) {
     vec4 R = u_rect[i];
     vec4 P = u_prop[i];
-    float rad = P.x, s = P.y, sh = P.z;
+    float rad = radius_of(i), s = P.y, sh = P.z;
+    float glow = u_fx[i].x, press = u_fx[i].y, value = u_fx[i].z;
+    if (s <= 0.001) return col;
+    bool light = light_ui();
+    float d = sdf(p, R, rad);
+    if (d > sh * 5.0 * u_ppp + 4.0) return col;
+
+    vec3 shadowed = col;
+    if (kind == 0 && cls != 1) {
+        float ds = sdf(p - vec2(0.0, sh * 0.3 * u_ppp), R, rad);
+        shadowed = col * (1.0 - s * (light ? 0.06 : 0.24) * exp(-max(ds, 0.0) / (sh * 1.3 * u_ppp + 1.0)));
+    } else if (kind == 3) {
+        float ds = sdf(p - vec2(0.0, 1.0 * u_ppp), R, rad);
+        shadowed = col * (1.0 - s * (light ? 0.22 : 0.40) * exp(-max(ds, 0.0) / (2.5 * u_ppp)));
+    }
+    float cov = clamp(0.5 - d, 0.0, 1.0);
+    if (cov <= 0.0) return shadowed;
+
+    vec3 c;
+    vec4 edge = u_edge.a >= 0.0 ? u_edge : (light ? vec4(0.0, 0.0, 0.0, 0.10) : vec4(1.0, 1.0, 1.0, 0.085));
+    float line = 1.0 - smoothstep(0.0, 1.0 * u_ppp, -d);
+    if (kind == 0) {
+        vec3 under = backdrop(p, u_frost);
+        vec4 surf = u_cls[cls].a >= 0.0 ? u_cls[cls]
+                  : (light ? vec4(1.0, 1.0, 1.0, cls == 1 ? 0.34 : 0.66) : vec4(1.0, 1.0, 1.0, cls == 1 ? 0.028 : 0.052));
+        // Dialogs and menus sit over the page: more solid, and calmer behind.
+        if (over) {
+            under = mix(under, bg_color(), 0.55);
+            if (u_cls[cls].a < 0.0) surf.a = light ? 0.88 : 0.095;
+        }
+        c = mix(under, surf.rgb, clamp(surf.a, 0.0, 1.0));
+        // Hover, emphasis and press only shift the tone a touch.
+        float lift = (light ? -0.030 : 0.050) * glow + (light ? -0.040 : 0.035) * press;
+        c += lift;
+        c = mix(c, edge.rgb, edge.a * line);
+    } else if (kind == 3) {
+        // The volume knob: a plain disc.
+        c = light ? vec3(1.0) : vec3(0.94);
+        c = mix(c, vec3(0.0), (light ? 0.16 : 0.0) * line);
+    } else {
+        // Something on a panel (the picked row, a hovered button): a faint tint.
+        float a = (light ? 0.060 : 0.085) + (light ? 0.050 : 0.065) * glow + (light ? 0.040 : 0.040) * press;
+        c = mix(col, light ? vec3(0.0) : vec3(1.0), a);
+    }
+    c = progress(c, p, i, d);
+    return mix(shadowed, clamp(c, 0.0, 1.0), cov * min(s, 1.0));
+}
+
+// kind: 0 glass on the background (refracts it), 1 glass stacked on glass,
+// 3 lens (stacked glass that magnifies the volume track under it).
+vec3 layer(vec3 col, vec2 p, int i, int kind, int cls, vec3 pre_track, int tr) {
+    vec4 R = u_rect[i];
+    vec4 P = u_prop[i];
+    float rad = radius_of(i), s = P.y, sh = P.z;
     float glow = u_fx[i].x, press = u_fx[i].y, value = u_fx[i].z;
     if (s <= 0.001) return col;
     bool light = light_ui();
@@ -345,7 +430,7 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, vec3 pre_track, int tr) {
     vec3 under;
     vec2 disp = -n * bevel * 0.9 * slope;
     if (kind == 0) {
-        float blur = 16.0 * u_ppp;
+        float blur = u_frost;
         if (u_theme == 2) {
             float k = 0.05 * slope;
             under = vec3(backdrop(p + disp * (1.0 + k), blur).r,
@@ -373,7 +458,13 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, vec3 pre_track, int tr) {
         milk = mix(base, clear, value) + (light ? 0.12 : 0.06) * glow + (light ? 0.10 : 0.07) * press;
     }
 
-    vec3 c = mix(under, vec3(1.0), milk);
+    // A set panel colour tints the glass instead of plain white.
+    vec3 tintc = vec3(1.0);
+    if (kind == 0 && u_cls[cls].a >= 0.0) {
+        tintc = u_cls[cls].rgb;
+        milk = clamp(u_cls[cls].a + (light ? 0.12 : 0.06) * glow + (light ? 0.10 : 0.07) * press, 0.0, 1.0);
+    }
+    vec3 c = mix(under, tintc, milk);
     if (light) {
         c -= slope * (0.09 + 0.05 * glow) * (1.0 - 0.75 * lit);      // refraction ring
         c += pow(edge, 6.0) * (0.30 * sl + 0.15 * sb);
@@ -387,18 +478,7 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, vec3 pre_track, int tr) {
         vec3 lc = mix(vec3(0.18), vec3(0.88), clamp(0.08 + 1.2 * sl + 0.7 * sb + near, 0.0, 1.0));
         c = mix(c, lc, (1.0 - smoothstep(0.0, 1.2 * u_ppp, inside)) * 0.95);
     }
-    // Progress fill (the player bar doubles as the seek bar).
-    float fill = u_fx[i].w;
-    if (fill >= 0.0) {
-        float fx = R.x - R.z + 2.0 * R.z * fill;
-        float f = clamp(fx - p.x + 0.5, 0.0, 1.0);
-        vec3 tint = u_theme == 5 ? mix(c, u_accent, 0.18)
-                  : (light_ui() ? c * 0.93 : (u_theme == 2 ? mix(c, vec3(1.0, 0.72, 0.80), 0.16) : c + vec3(0.065)));
-        c = mix(c, tint, f);
-        // Bright playhead line.
-        float head = exp(-abs(p.x - fx) / (1.1 * u_ppp)) * smoothstep(5.0 * u_ppp, 10.0 * u_ppp, -d) * step(0.002, fill) * step(fill, 0.998);
-        c += head * (light_ui() ? 0.0 : 0.35) - head * (light_ui() ? 0.25 : 0.0);
-    }
+    c = progress(c, p, i, d);
     return mix(shadowed, clamp(c, 0.0, 1.0), cov * min(s, 1.0));
 }
 
@@ -413,11 +493,12 @@ void main() {
         col = base;
         for (int i = 0; i < MAX_EL; i++) {
             if (i >= u_count) break;
-            col = layer(col, p, i, i == 0 ? 0 : int(u_prop[i].w + 0.5), base, -1);
+            int k = i == 0 ? 0 : int(u_prop[i].w + 0.5) % 10;
+            col = u_flat == 1 ? flat_layer(col, p, i, k, 0, i == 0) : layer(col, p, i, k, 0, base, -1);
         }
-        float d0 = sdf(p, u_rect[0], u_prop[0].x);
+        float d0 = sdf(p, u_rect[0], radius_of(0));
         float cov0 = clamp(0.5 - d0, 0.0, 1.0);
-        float ds = sdf(p - vec2(0.0, 8.0 * u_ppp), u_rect[0], u_prop[0].x);
+        float ds = sdf(p - vec2(0.0, 8.0 * u_ppp), u_rect[0], radius_of(0));
         float sh = (light_ui() ? 0.16 : 0.45) * exp(-max(ds, 0.0) / (16.0 * u_ppp));
         float a_out = 1.0 - (1.0 - u_dim) * (1.0 - sh);
         col += (hash2(p) - 0.5) / 255.0;
@@ -428,13 +509,16 @@ void main() {
     int tr = -1;
     for (int i = 0; i < MAX_EL; i++) {
         if (i >= u_count) break;
-        int kind = int(u_prop[i].w + 0.5);
+        int code = int(u_prop[i].w + 0.5);
+        int kind = code % 10, cls = min(code / 10, 2);
         if (kind == 2) {
             pre_track = col;
             tr = i;
             col = track(col, p, i);
+        } else if (u_flat == 1) {
+            col = flat_layer(col, p, i, kind, cls, false);
         } else {
-            col = layer(col, p, i, kind, pre_track, tr);
+            col = layer(col, p, i, kind, cls, pre_track, tr);
         }
     }
     col += (hash2(p) - 0.5) / 255.0;
@@ -458,6 +542,16 @@ pub struct El {
     pub value: f32,
     /// Progress fill 0..1 drawn inside the element (< 0 = none).
     pub fill: f32,
+    /// Which part of the window it is (a theme's CSS can colour these apart).
+    pub class: Class,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum Class {
+    #[default]
+    Panel = 0,
+    Sidebar = 1,
+    Player = 2,
 }
 
 impl El {
@@ -475,11 +569,17 @@ impl El {
             press,
             value: 0.0,
             fill: -1.0,
+            class: Class::Panel,
         }
     }
 
     pub fn with_fill(mut self, f: f32) -> El {
         self.fill = f.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn with_class(mut self, c: Class) -> El {
+        self.class = c;
         self
     }
 
@@ -523,6 +623,15 @@ pub struct Frame {
     pub custom_bg: [f32; 3],
     pub accent: [f32; 3],
     pub light_ui: bool,
+    /// The simple flat look (liquid glass off).
+    pub flat: bool,
+    /// Fills of panels / the sidebar / the player bar set by a theme's CSS
+    /// (alpha < 0: the look's own), and the same for the hairline.
+    pub fills: [[f32; 4]; 3],
+    pub edge: [f32; 4],
+    /// Largest panel corner radius and blur behind panels (points).
+    pub round: f32,
+    pub frost: f32,
 }
 
 pub struct GlassRenderer {
@@ -660,6 +769,12 @@ impl GlassRenderer {
             gl.uniform_3_f32(loc("u_cbg").as_ref(), f.custom_bg[0], f.custom_bg[1], f.custom_bg[2]);
             gl.uniform_3_f32(loc("u_accent").as_ref(), f.accent[0], f.accent[1], f.accent[2]);
             gl.uniform_1_i32(loc("u_light_ui").as_ref(), f.light_ui as i32);
+            gl.uniform_1_i32(loc("u_flat").as_ref(), f.flat as i32);
+            let fills: Vec<f32> = f.fills.iter().flatten().copied().collect();
+            gl.uniform_4_f32_slice(loc("u_cls[0]").as_ref(), &fills);
+            gl.uniform_4_f32(loc("u_edge").as_ref(), f.edge[0], f.edge[1], f.edge[2], f.edge[3]);
+            gl.uniform_1_f32(loc("u_round").as_ref(), f.round * f.ppp);
+            gl.uniform_1_f32(loc("u_frost").as_ref(), f.frost * f.ppp);
             gl.uniform_2_f32(loc("u_res").as_ref(), f.res[0], f.res[1]);
             gl.uniform_1_f32(loc("u_ppp").as_ref(), f.ppp);
             gl.uniform_1_f32(loc("u_time").as_ref(), f.time);
@@ -670,7 +785,7 @@ impl GlassRenderer {
             let mut fx = [0.0f32; MAX_EL * 4];
             for (i, e) in f.els.iter().enumerate() {
                 rect[i * 4..i * 4 + 4].copy_from_slice(&[e.center[0], e.center[1], e.half[0], e.half[1]]);
-                prop[i * 4..i * 4 + 4].copy_from_slice(&[e.radius, e.strength, e.shadow, e.kind as i32 as f32]);
+                prop[i * 4..i * 4 + 4].copy_from_slice(&[e.radius, e.strength, e.shadow, (e.kind as i32 + 10 * e.class as i32) as f32]);
                 fx[i * 4..i * 4 + 4].copy_from_slice(&[e.glow, e.press, e.value, e.fill]);
             }
             gl.uniform_4_f32_slice(loc("u_rect[0]").as_ref(), &rect);

@@ -5,7 +5,7 @@ use egui::load::{SizeHint, TexturePoll};
 use egui::text::{LayoutJob, TextWrapping};
 use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, CursorIcon, FontFamily, FontId, Id, Painter, Pos2, Rect, Response,
-    Sense, TextFormat, TextureOptions, Ui, Vec2,
+    Sense, Stroke, TextFormat, TextureOptions, Ui, Vec2,
 };
 
 use crate::glass::{El, Kind};
@@ -40,12 +40,8 @@ fn placeholder(ui: &Ui, icons: &mut Icons, rect: Rect, radius: f32, icon: &'stat
 /// Cover art from a URL (http(s) or file://) with rounded corners; shows a
 /// placeholder icon while loading or if it fails.
 pub fn cover(ui: &Ui, icons: &mut Icons, rect: Rect, uri: Option<&str>, radius: f32, fallback: &'static str, theme: Theme) {
-    // Navidrome covers are stored without the login; add it only here.
-    let resolved = uri.filter(|u| u.starts_with(crate::navidrome::COVER_SCHEME)).map(crate::navidrome::resolve_cover);
-    let uri = match resolved {
-        Some(r) => r.as_deref().map(|s| s.to_string()),
-        None => uri.map(String::from),
-    };
+    // Server covers are stored without the login; add it only here.
+    let uri = uri.and_then(crate::stream::cover_link);
     if let Some(uri) = uri.as_deref() {
         let poll = ui.ctx().try_load_texture(uri, TextureOptions::LINEAR, SizeHint::Scale(1.0.into()));
         if let Ok(TexturePoll::Ready { texture }) = poll {
@@ -60,7 +56,7 @@ pub fn cover(ui: &Ui, icons: &mut Icons, rect: Rect, uri: Option<&str>, radius: 
 /// A cover's texture once loaded, with the crop that fills `aspect`.
 pub fn cover_texture(ctx: &egui::Context, uri: Option<&str>, aspect: Vec2) -> Option<(egui::TextureId, Rect)> {
     let uri = uri?;
-    let resolved = if uri.starts_with(crate::navidrome::COVER_SCHEME) { crate::navidrome::resolve_cover(uri)? } else { uri.to_string() };
+    let resolved = crate::stream::cover_link(uri)?;
     match ctx.try_load_texture(&resolved, TextureOptions::LINEAR, SizeHint::Scale(1.0.into())) {
         Ok(TexturePoll::Ready { texture }) => Some((texture.id, cover_uv(&resolved, texture.size, aspect))),
         _ => None,
@@ -305,4 +301,93 @@ mod search_tests {
         assert_eq!(filter_tracks(&list, "kanye heart"), vec![2], "every word must match");
         assert!(filter_tracks(&list, "nothing like this").is_empty());
     }
+}
+
+/// What a line slider goes over.
+pub struct Slide {
+    pub min: f32,
+    pub max: f32,
+    /// The value the bold part of the line starts from (and a double-click goes back to).
+    pub neutral: f32,
+    pub step: f32,
+    /// Faint marks every this much (0: none).
+    pub marks: f32,
+}
+
+pub struct SlideOut {
+    pub value: f32,
+    pub changed: bool,
+    /// The mouse let go (a good moment to save).
+    pub released: bool,
+    /// Hovered or dragged, 0..1 (eased).
+    pub hot: f32,
+}
+
+/// A slider that is just a line: thin from end to end, bold between
+/// "normal" and the value, with a short crossing line as the handle that
+/// grows when you grab it. The drawn value glides to the real one.
+/// `a` → `b` is the line from lowest to highest (any direction).
+/// Double-click resets it.
+#[allow(clippy::too_many_arguments)]
+pub fn line_slider(ui: &Ui, id: Id, a: Pos2, b: Pos2, value: f32, s: &Slide, fg: Color32, dim: Color32, enabled: bool) -> SlideOut {
+    let ctx = ui.ctx().clone();
+    let axis = b - a;
+    let len = axis.length().max(1.0);
+    let (dir, across) = (axis / len, vec2(-axis.y, axis.x) / len);
+    let hit = Rect::from_two_pos(a, b).expand(13.0);
+    let resp = ui.interact(hit, id, if enabled { Sense::click_and_drag() } else { Sense::hover() });
+    let resp = if enabled { resp.on_hover_cursor(if axis.x.abs() > axis.y.abs() { CursorIcon::ResizeHorizontal } else { CursorIcon::ResizeVertical }) } else { resp };
+    let mut out = SlideOut { value, changed: false, released: false, hot: 0.0 };
+    if enabled {
+        if resp.double_clicked() {
+            out.value = s.neutral;
+            out.released = true;
+        } else if let Some(pt) = resp.interact_pointer_pos().filter(|_| resp.dragged() || resp.clicked() || resp.drag_started()) {
+            let t = ((pt - a).dot(dir) / len).clamp(0.0, 1.0);
+            let raw = s.min + t * (s.max - s.min);
+            out.value = ((raw / s.step).round() * s.step).clamp(s.min, s.max);
+        }
+        if resp.drag_stopped() || resp.clicked() {
+            out.released = true;
+        }
+        out.changed = (out.value - value).abs() > s.step * 0.01;
+    }
+    // The drawn value glides (faster while dragging).
+    let dt = ctx.input(|i| i.stable_dt).min(0.05);
+    let shown_id = id.with("shown");
+    let mut shown: f32 = ctx.data(|d| d.get_temp(shown_id)).unwrap_or(out.value);
+    shown += (out.value - shown) * (dt * if resp.dragged() { 30.0 } else { 14.0 }).min(1.0);
+    if (shown - out.value).abs() < (s.max - s.min) * 0.0005 {
+        shown = out.value;
+    } else {
+        ctx.request_repaint();
+    }
+    ctx.data_mut(|d| d.insert_temp(shown_id, shown));
+    let hv = ctx.animate_bool_with_time(id.with("h"), (resp.hovered() || resp.dragged()) && enabled, 0.16);
+    let dr = ctx.animate_bool_with_time(id.with("d"), resp.dragged(), 0.12);
+    out.hot = hv;
+
+    let k = if enabled { 1.0 } else { 0.4 };
+    let at = |v: f32| a + dir * ((v - s.min) / (s.max - s.min) * len);
+    let p = ui.painter();
+    p.line_segment([a, b], Stroke::new(1.5_f32, dim.gamma_multiply(0.45 * k)));
+    if s.marks > 0.0 {
+        let mut m = (s.min / s.marks).ceil() * s.marks;
+        while m <= s.max + 1e-4 {
+            let c = at(m);
+            let tall = if (m - s.neutral).abs() < 1e-4 { 5.0 } else { 2.5 };
+            p.line_segment([c - across * tall, c + across * tall], Stroke::new(1.2_f32, dim.gamma_multiply(if tall > 3.0 { 0.8 } else { 0.4 } * k)));
+            m += s.marks;
+        }
+    }
+    if enabled {
+        let (from, to) = (at(s.neutral.clamp(s.min, s.max)), at(shown));
+        p.line_segment([from, to], Stroke::new(2.5 + 1.0 * hv, fg));
+        let hh = 7.0 + 3.0 * hv + 2.0 * dr;
+        if dr > 0.0 {
+            p.circle_filled(to, 12.0 * dr, fg.gamma_multiply(0.12 * dr));
+        }
+        p.line_segment([to - across * hh, to + across * hh], Stroke::new(2.5 + 0.5 * hv, fg));
+    }
+    out
 }

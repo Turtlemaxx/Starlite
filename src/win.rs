@@ -131,3 +131,37 @@ pub fn style_window(hwnd: isize, light: bool) {
         );
     }
 }
+
+/// Windows' list of installed fonts (for everyone and for this user):
+/// pairs like ("Arial Bold (TrueType)", "arialbd.ttf").
+pub fn font_table() -> Vec<(String, String)> {
+    use windows_sys::Win32::System::Registry::{RegCloseKey, RegEnumValueW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_SZ};
+    let sub: Vec<u16> = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Fonts".encode_utf16().chain(Some(0)).collect();
+    let mut out = Vec::new();
+    for root in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
+        unsafe {
+            let mut key: HKEY = std::ptr::null_mut();
+            if RegOpenKeyExW(root, sub.as_ptr(), 0, KEY_READ, &mut key) != 0 {
+                continue;
+            }
+            for i in 0..20_000u32 {
+                let mut name = [0u16; 512];
+                let mut data = [0u16; 1024];
+                let (mut name_len, mut data_len, mut ty) = (name.len() as u32, (data.len() * 2) as u32, 0u32);
+                let r = RegEnumValueW(key, i, name.as_mut_ptr(), &mut name_len, std::ptr::null(), &mut ty, data.as_mut_ptr() as *mut u8, &mut data_len);
+                // 259: no more values. Anything else odd (a very long entry): skip it.
+                if r == 259 {
+                    break;
+                }
+                if r != 0 || ty != REG_SZ {
+                    continue;
+                }
+                let n = String::from_utf16_lossy(&name[..(name_len as usize).min(name.len())]);
+                let d = String::from_utf16_lossy(&data[..(data_len as usize / 2).min(data.len())]);
+                out.push((n, d.trim_end_matches('\0').to_string()));
+            }
+            RegCloseKey(key);
+        }
+    }
+    out
+}

@@ -137,7 +137,7 @@ impl Preview {
     }
 
     /// Starts previewing `track` (loads in the background). `stream`: a
-    /// Navidrome download link. `online`: may look lyrics up on lrclib.net.
+    /// server's preview link (with a `{secs}` or `{ticks}` start in it). `online`: may look lyrics up on lrclib.net.
     pub fn play(&mut self, track: &Track, stream: Option<String>, online: bool) {
         if self.current.as_deref() == Some(track.id.as_str()) {
             return;
@@ -196,7 +196,7 @@ impl Preview {
                     }
                     Box::new(dec.convert_samples::<f32>().take_duration(Duration::from_millis(LENGTH_MS)))
                 }
-                (Source::Navidrome { .. }, Some(url)) => {
+                (Source::Navidrome { .. } | Source::Jellyfin { .. }, Some(url)) => {
                     // The server starts the stream at the chorus (timeOffset)
                     // and the preview plays while the rest arrives: no
                     // waiting for the song from its beginning.
@@ -204,7 +204,9 @@ impl Preview {
                     if gen.load(Ordering::SeqCst) != g {
                         return;
                     }
-                    let url = format!("{url}&timeOffset={}", start / 1000);
+                    // Whole seconds (Jellyfin counts in ticks of 100 ns); the rest is skipped below.
+                    let secs = start / 1000;
+                    let url = url.replace("{secs}", &secs.to_string()).replace("{ticks}", &(secs * 10_000_000).to_string());
                     // 160 kbps MP3 is 20 bytes a millisecond.
                     let Ok(live) = Live::open(&url, (LENGTH_MS + 3_000) * 20 + 64 * 1024, gen.clone(), g) else { return };
                     // A few seconds in hand first, so playback never waits on the network.

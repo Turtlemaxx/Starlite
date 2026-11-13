@@ -17,6 +17,8 @@ pub enum Source {
     YouTube { video_id: String },
     /// A song on the user's Navidrome server (streamed from it).
     Navidrome { song_id: String, suffix: String },
+    /// A song on the user's Jellyfin server (streamed from it).
+    Jellyfin { item_id: String },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -45,7 +47,7 @@ impl Track {
     pub fn source_name(&self) -> Option<&'static str> {
         match self.source {
             Source::YouTube { .. } => Some("YouTube"),
-            Source::File { .. } | Source::Navidrome { .. } => None,
+            Source::File { .. } | Source::Navidrome { .. } | Source::Jellyfin { .. } => None,
         }
     }
 }
@@ -70,10 +72,13 @@ pub struct Playlist {
     pub fixed: bool,
 }
 
-/// A Navidrome playlist added to your playlists in the sidebar. Only the
-/// link is kept: its songs load from the server when you open it.
+/// A Navidrome or Jellyfin playlist added to your playlists in the sidebar.
+/// Only the link is kept: its songs load from the server when you open it.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct NdLink {
+    /// Which server it's on (Navidrome in files from before Jellyfin).
+    #[serde(default)]
+    pub server: crate::stream::Server,
     pub id: String,
     pub title: String,
     #[serde(default)]
@@ -85,8 +90,8 @@ pub struct NdLink {
 }
 
 impl NdLink {
-    pub fn from_remote(p: &crate::youtube::RemotePlaylist) -> NdLink {
-        NdLink { id: p.id.clone(), title: p.title.clone(), owner: p.artist.clone(), artwork: p.artwork.clone(), track_count: p.track_count }
+    pub fn from_remote(server: crate::stream::Server, p: &crate::youtube::RemotePlaylist) -> NdLink {
+        NdLink { server, id: p.id.clone(), title: p.title.clone(), owner: p.artist.clone(), artwork: p.artwork.clone(), track_count: p.track_count }
     }
     pub fn to_remote(&self) -> crate::youtube::RemotePlaylist {
         crate::youtube::RemotePlaylist { id: self.id.clone(), title: self.title.clone(), artist: self.owner.clone(), artwork: self.artwork.clone(), permalink: None, track_count: self.track_count }
@@ -298,17 +303,17 @@ impl Library {
         n
     }
 
-    pub fn nd_link(&self, id: &str) -> Option<&NdLink> {
-        self.nd_links.iter().find(|l| l.id == id)
+    pub fn nd_link(&self, server: crate::stream::Server, id: &str) -> Option<&NdLink> {
+        self.nd_links.iter().find(|l| l.server == server && l.id == id)
     }
 
     /// Adds a Navidrome playlist to your playlists, or takes it away again.
-    pub fn toggle_nd_link(&mut self, p: &crate::youtube::RemotePlaylist) -> bool {
-        let added = if let Some(i) = self.nd_links.iter().position(|l| l.id == p.id) {
+    pub fn toggle_nd_link(&mut self, server: crate::stream::Server, p: &crate::youtube::RemotePlaylist) -> bool {
+        let added = if let Some(i) = self.nd_links.iter().position(|l| l.server == server && l.id == p.id) {
             self.nd_links.remove(i);
             false
         } else {
-            self.nd_links.push(NdLink::from_remote(p));
+            self.nd_links.push(NdLink::from_remote(server, p));
             true
         };
         self.save();
@@ -316,11 +321,11 @@ impl Library {
     }
 
     /// Keeps linked playlists' names, covers and counts up to date.
-    pub fn refresh_nd_links(&mut self, server: &[crate::youtube::RemotePlaylist]) {
+    pub fn refresh_nd_links(&mut self, server: crate::stream::Server, lists: &[crate::youtube::RemotePlaylist]) {
         let mut changed = false;
-        for l in &mut self.nd_links {
-            if let Some(p) = server.iter().find(|p| p.id == l.id) {
-                let fresh = NdLink::from_remote(p);
+        for l in self.nd_links.iter_mut().filter(|l| l.server == server) {
+            if let Some(p) = lists.iter().find(|p| p.id == l.id) {
+                let fresh = NdLink::from_remote(server, p);
                 if *l != fresh {
                     *l = fresh;
                     changed = true;

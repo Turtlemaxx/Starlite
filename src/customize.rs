@@ -110,16 +110,22 @@ impl Starlite {
             let pr = ctx.animate_bool_with_time(id.with("p"), resp.is_pointer_button_down_on(), 0.09);
             let rr = Rect::from_center_size(r.center(), r.size() + Vec2::splat(4.0 * pr));
             els.push(El::rect(rr, ppp, 22.0, 1.0, 4.0 + 3.0 * h, Kind::Glass, 0.45 * h, pr));
-            let c = get(&self.custom, k);
+            // The theme's CSS can set a colour too; then that one counts.
+            let from_css = [self.css.background, self.css.accent, self.css.text][k];
+            let c = from_css.unwrap_or(get(&self.custom, k));
             let sc = pos2(r.left() + 24.0, r.center().y);
             p.circle_filled(sc, 11.0 + 1.0 * h, c32(c));
             p.circle_stroke(sc, 11.0 + 1.0 * h, Stroke::new(1.0_f32, theme.text().gamma_multiply(0.35)));
             text_trunc(&p, pos2(r.left() + 44.0, r.center().y - 7.0), Align2::LEFT_CENTER, NAMES[k], font(13.5, "semibold"), theme.text(), cw - 54.0);
-            text_trunc(&p, pos2(r.left() + 44.0, r.center().y + 10.0), Align2::LEFT_CENTER, &hex_of(c), font(11.5, "regular"), theme.text_dim(), cw - 54.0);
+            let second = if from_css.is_some() { "from your CSS".to_string() } else { hex_of(c) };
+            text_trunc(&p, pos2(r.left() + 44.0, r.center().y + 10.0), Align2::LEFT_CENTER, &second, font(11.5, "regular"), theme.text_dim(), cw - 54.0);
             // Debug: STARLITE_COLOR_PICK=0..2 opens that colour's picker once.
             static DEBUG_PICK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
             let debug = std::env::var("STARLITE_COLOR_PICK").ok().and_then(|v| v.parse::<usize>().ok()) == Some(k) && !DEBUG_PICK.swap(true, std::sync::atomic::Ordering::Relaxed);
-            if resp.clicked() || debug {
+            if resp.clicked() && from_css.is_some() {
+                self.sound.click();
+                self.toast("Your theme.css sets this colour");
+            } else if resp.clicked() || debug {
                 self.sound.click();
                 self.color_pick = if open { None } else { Some(ColorPick { which: k, from: r, open_t: 0.0, hsv: rgb_to_hsv(c), hex: hex_of(c) }) };
             }
@@ -156,13 +162,43 @@ impl Starlite {
                 self.custom_changed(&ctx, true);
             }
         }
-        y2 + 38.0
+        // The theme's CSS file: opens in Notepad, read again on every save.
+        let y3 = y2 + 52.0;
+        let cr = Rect::from_min_size(pos2(x0, y3), vec2(126.0, 38.0));
+        if pill(ui, icons, els, ppp, Id::new("custom_css"), cr, "Edit CSS", Some("external-link"), false, false, theme).on_hover_text("Opens theme.css; save it and Starlite shows the change").clicked() {
+            self.sound.click();
+            let f = Self::css_file();
+            if !f.exists() {
+                if let Some(d) = f.parent() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+                let _ = std::fs::write(&f, crate::css::TEMPLATE);
+            }
+            if std::process::Command::new("notepad.exe").arg(&f).spawn().is_err() {
+                self.toast("Couldn't open Notepad");
+            }
+        }
+        // What the file does, or the first thing in it Starlite can't use.
+        let sets = self.css.sets();
+        let missing_font = self.css_font.as_ref().filter(|f| !f.1).map(|f| format!("The font \u{201c}{}\u{201d} isn't installed on this PC", f.0));
+        let (line, bad) = match (self.css.problems.first(), missing_font) {
+            (Some((n, what)), _) => {
+                let more = self.css.problems.len() - 1;
+                (format!("Line {n}: {what}{}", if more > 0 { format!(" (and {more} more)") } else { String::new() }), true)
+            }
+            (None, Some(m)) => (m, true),
+            (None, None) if sets.is_empty() => ("Colours, corners, blur and font, written as CSS".to_string(), false),
+            (None, None) => (format!("Sets the {}", sets.join(", ")), false),
+        };
+        let c = if bad { egui::Color32::from_rgb(235, 90, 100) } else { theme.text_dim() };
+        text_trunc(&p, pos2(cr.right() + 14.0, cr.center().y), Align2::LEFT_CENTER, &line, font(12.5, "regular"), c, (w - cr.width() - 14.0).max(80.0));
+        y3 + 38.0
     }
 
     /// The custom colours changed: use them now (and save when `save`).
     pub fn custom_changed(&mut self, ctx: &egui::Context, save: bool) {
         let was_light = self.theme.is_light();
-        CustomTheme::set(self.custom.clone());
+        CustomTheme::set(self.effective_custom());
         if self.theme == Theme::Custom && was_light != self.theme.is_light() {
             self.apply_theme(ctx);
         }

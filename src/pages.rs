@@ -7,6 +7,7 @@ use crate::app::{Starlite, View};
 use crate::glass::{El, Kind};
 use crate::icons::Icons;
 use crate::library::{downloads_dir, Cover, Track, DOWNLOADED_ID, LIKED_ID};
+use crate::stream::Server;
 use crate::theme::Theme;
 use crate::widgets::{cover, field, filter_tracks, fmt_duration, font, icon_button, pill, playlist_cover, search_field, text_trunc};
 
@@ -42,50 +43,54 @@ impl Starlite {
             View::Settings => self.settings_page(ui, icons, els, ppp, content),
             View::Playlist(id) => self.local_playlist_page(ui, icons, els, ppp, content, &id),
             View::YtPlaylist => self.yt_playlist_page(ui, icons, els, ppp, content, animating),
-            View::Navidrome => self.navidrome_page(ui, icons, els, ppp, content, animating),
+            View::Server(s) => self.server_page(ui, icons, els, ppp, content, animating, s),
         }
     }
 
-    // ── Navidrome ──────────────────────────────────────────────────
+    // ── Music servers (Navidrome, Jellyfin) ────────────────────────
 
     #[allow(clippy::too_many_arguments)]
-    fn navidrome_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect, animating: &mut bool) {
+    fn server_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect, animating: &mut bool, s: Server) {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
-        let title_r = p.text(pos2(content.left(), 30.0), Align2::LEFT_TOP, "Navidrome", font(30.0, "bold"), theme.text());
+        let title_r = p.text(pos2(content.left(), 30.0), Align2::LEFT_TOP, s.name(), font(30.0, "bold"), theme.text());
 
-        let Some((url, user)) = self.nd.connected() else {
+        let Some((url, user)) = self.server_connected(s) else {
             // Connect form.
             let b = Rect::from_min_size(pos2(content.left(), 96.0), vec2(content.width().min(560.0), 352.0));
             els.push(El::rect(b, ppp, 26.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0));
-            icons.paint(ui, "cloudy", pos2(b.left() + 40.0, b.top() + 42.0), 24.0, theme.accent());
-            p.text(pos2(b.left() + 64.0, b.top() + 42.0), Align2::LEFT_CENTER, "Connect your Navidrome server", font(18.0, "bold"), theme.text());
+            icons.paint(ui, s.icon(), pos2(b.left() + 40.0, b.top() + 42.0), 24.0, theme.accent());
+            p.text(pos2(b.left() + 64.0, b.top() + 42.0), Align2::LEFT_CENTER, format!("Connect your {} server", s.name()), font(18.0, "bold"), theme.text());
             p.text(pos2(b.left() + 26.0, b.top() + 76.0), Align2::LEFT_CENTER, "Sign in to play your server's playlists here.", font(13.5, "regular"), theme.text_dim());
             let fw = b.width() - 52.0;
             let mut y = b.top() + 100.0;
             let mut submit = false;
-            for (i, (hint, password)) in [("Server address, e.g. http://192.168.1.10:4533", false), ("Username", false), ("Password", true)].into_iter().enumerate() {
+            let address = match s {
+                Server::Navidrome => "Server address, e.g. http://192.168.1.10:4533",
+                Server::Jellyfin => "Server address, e.g. http://192.168.1.10:8096",
+            };
+            for (i, (hint, password)) in [(address, false), ("Username", false), ("Password", true)].into_iter().enumerate() {
                 let r = Rect::from_min_size(pos2(b.left() + 26.0, y), vec2(fw, 40.0));
                 let mut v = match i {
-                    0 => std::mem::take(&mut self.ndst.url),
-                    1 => std::mem::take(&mut self.ndst.user),
-                    _ => std::mem::take(&mut self.ndst.pass),
+                    0 => std::mem::take(&mut self.st(s).url),
+                    1 => std::mem::take(&mut self.st(s).user),
+                    _ => std::mem::take(&mut self.st(s).pass),
                 };
                 let resp = field(ui, els, ppp, r, &mut v, hint, password, true, theme);
                 if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                     submit = true;
                 }
                 match i {
-                    0 => self.ndst.url = v,
-                    1 => self.ndst.user = v,
-                    _ => self.ndst.pass = v,
+                    0 => self.st(s).url = v,
+                    1 => self.st(s).user = v,
+                    _ => self.st(s).pass = v,
                 }
                 y += 50.0;
             }
-            let busy = self.ndst.busy;
+            let busy = self.st(s).busy;
             let r = Rect::from_min_size(pos2(b.left() + 26.0, y + 6.0), vec2(150.0, 38.0));
-            if pill(ui, icons, els, ppp, Id::new("nd_connect"), r, if busy { "Connecting…" } else { "Connect" }, Some("cloudy"), true, true, theme).clicked() {
+            if pill(ui, icons, els, ppp, Id::new("nd_connect"), r, if busy { "Connecting…" } else { "Connect" }, Some(s.icon()), true, true, theme).clicked() {
                 submit = true;
             }
             if busy {
@@ -93,16 +98,16 @@ impl Starlite {
             }
             if submit && !busy {
                 self.sound.click();
-                self.connect_navidrome(&ctx);
+                self.connect_server(&ctx, s);
             }
-            if let Some(e) = self.ndst.error.clone() {
+            if let Some(e) = self.st(s).error.clone() {
                 text_trunc(&p, pos2(r.right() + 16.0, r.center().y), Align2::LEFT_CENTER, &e, font(13.0, "semibold"), Color32::from_rgb(235, 87, 87), b.right() - r.right() - 32.0);
             }
             return;
         };
 
         // Connected: refresh, who / where, disconnect.
-        let loading = self.ndst.loading;
+        let loading = self.st(s).loading;
         let rc = pos2(title_r.right() + 30.0, title_r.center().y + 1.0);
         let r = icon_button(ui, icons, els, ppp, Id::new("nd_refresh"), rc, 38.0, "rotate-cw", false, false, theme).on_hover_text("Reload playlists");
         if loading {
@@ -113,15 +118,14 @@ impl Starlite {
         }
         if r.clicked() && !loading {
             self.sound.click();
-            self.load_navidrome(&ctx);
+            self.load_server(&ctx, s);
         }
         let host = url.split("://").nth(1).unwrap_or(&url).to_string();
         let who = text_trunc(&p, pos2(rc.x + 34.0, rc.y), Align2::LEFT_CENTER, &format!("{user} · {host}"), font(13.0, "regular"), theme.text_dim(), (content.right() - rc.x - 300.0).max(60.0));
         let dr = Rect::from_min_size(pos2(who.right() + 16.0, rc.y - 16.0), vec2(112.0, 32.0));
         if pill(ui, icons, els, ppp, Id::new("nd_disconnect"), dr, "Disconnect", None, false, false, theme).clicked() {
             self.sound.click();
-            self.nd.disconnect();
-            self.ndst = Default::default();
+            self.disconnect_server(s);
             return;
         }
 
@@ -129,14 +133,14 @@ impl Starlite {
         let area = Rect::from_min_max(pos2(content.left(), 96.0), pos2(content.right(), content.bottom()));
         els.push(El::rect(area, ppp, 26.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0));
         let inner = area.shrink2(vec2(24.0, 22.0));
-        let pls = self.ndst.playlists.clone();
+        let pls = self.st(s).playlists.clone();
         if pls.is_empty() {
-            let msg = if loading || !self.ndst.loaded {
+            let msg = if loading || !self.st(s).loaded {
                 if !loading {
-                    self.load_navidrome(&ctx);
+                    self.load_server(&ctx, s);
                 }
                 "Loading playlists…".to_string()
-            } else if let Some(e) = &self.ndst.error {
+            } else if let Some(e) = &self.st(s).error {
                 e.clone()
             } else {
                 "No playlists on your server yet".to_string()
@@ -150,10 +154,10 @@ impl Starlite {
         let ch = cw + 48.0;
         let mut open = None;
         let mut menu = None;
-        let linked: Vec<String> = self.lib.nd_links.iter().map(|l| l.id.clone()).collect();
+        let linked: Vec<String> = self.lib.nd_links.iter().filter(|l| l.server == s).map(|l| l.id.clone()).collect();
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
         child.set_clip_rect(inner.expand(10.0).intersect(area.shrink(2.0)));
-        egui::ScrollArea::vertical().id_salt("nd_grid").auto_shrink([false, false]).show(&mut child, |ui| {
+        egui::ScrollArea::vertical().id_salt(("srv_grid", s.name())).auto_shrink([false, false]).show(&mut child, |ui| {
             let rows = (pls.len() as f32 / cols).ceil();
             let (all, _) = ui.allocate_exact_size(vec2(inner.width(), rows * (ch + gap) - gap), Sense::hover());
             for (i, pl) in pls.iter().enumerate() {
@@ -162,15 +166,15 @@ impl Starlite {
                 if !ui.is_rect_visible(card) {
                     continue;
                 }
-                let resp = ui.interact(card, Id::new(("nd_pl", &pl.id)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                let resp = ui.interact(card, Id::new(("srv_pl", s.name(), &pl.id)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
                 let resp = if linked.contains(&pl.id) { resp.on_hover_text("In your playlists (right-click to remove)") } else { resp.on_hover_text("Right-click to add it to your playlists") };
-                let h = ui.ctx().animate_bool_with_time(Id::new(("nd_pl_h", &pl.id)), resp.hovered(), 0.15);
+                let h = ui.ctx().animate_bool_with_time(Id::new(("srv_pl_h", s.name(), &pl.id)), resp.hovered(), 0.15);
                 if h > 0.0 {
                     let c = if theme.is_light() { Color32::from_black_alpha((14.0 * h) as u8) } else { Color32::from_white_alpha((14.0 * h) as u8) };
                     ui.painter().rect_filled(card.expand(6.0), CornerRadius::same(16), c);
                 }
                 let art = Rect::from_min_size(card.min - vec2(0.0, 3.0 * h), Vec2::splat(cw));
-                cover(ui, icons, art, pl.artwork.as_deref(), 14.0, "cloudy", theme);
+                cover(ui, icons, art, pl.artwork.as_deref(), 14.0, s.icon(), theme);
                 text_trunc(ui.painter(), pos2(card.left() + 2.0, art.bottom() + 16.0), Align2::LEFT_CENTER, &pl.title, font(14.0, "semibold"), theme.text(), cw - 4.0);
                 let sub = format!("{} song{}", pl.track_count, if pl.track_count == 1 { "" } else { "s" });
                 text_trunc(ui.painter(), pos2(card.left() + 2.0, art.bottom() + 35.0), Align2::LEFT_CENTER, &sub, font(12.5, "regular"), theme.text_dim(), cw - 4.0);
@@ -184,11 +188,11 @@ impl Starlite {
         });
         if let Some(pl) = open {
             self.sound.click();
-            self.open_nd_playlist(&ctx, pl, false);
+            self.open_server_playlist(&ctx, s, pl, false);
         }
         if let Some((pl, at)) = menu {
             self.sound.click();
-            self.nd_menu = Some(crate::app::NdMenu { at, pl, open_t: 0.0 });
+            self.nd_menu = Some(crate::app::NdMenu { server: s, at, pl, open_t: 0.0 });
         }
     }
 
@@ -297,7 +301,7 @@ impl Starlite {
             return;
         };
         let sub = format!("{} song{}", tracks.len(), if tracks.len() == 1 { "" } else { "s" });
-        self.playlist_page(ui, icons, els, ppp, content, kind, &title, &sub, header, &tracks, false, None, None, false);
+        self.playlist_page(ui, icons, els, ppp, content, kind, &title, &sub, header, &tracks, false, None, None, None);
     }
 
     fn yt_playlist_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect, animating: &mut bool) {
@@ -306,8 +310,8 @@ impl Starlite {
             return;
         };
         let pl = v.pl.clone();
-        let from_nd = v.navidrome;
-        let back = v.navidrome && !v.linked;
+        let server = v.server;
+        let back = v.server.filter(|_| !v.linked);
         let (tracks, loading, error) = match &v.tracks {
             None => (Vec::new(), true, None),
             Some(Ok(t)) => (t.clone(), false, None),
@@ -316,7 +320,7 @@ impl Starlite {
         if loading {
             *animating = true;
         }
-        let src = if from_nd { "Navidrome" } else { "YouTube" };
+        let src = server.map_or("YouTube", |s| s.name());
         let sub = if pl.track_count > 0 { format!("by {} · {} songs · {src}", pl.artist, pl.track_count) } else { format!("by {} · {src}", pl.artist) };
         self.playlist_page(ui, icons, els, ppp, content, PlKind::Remote, &pl.title, &sub, Header::Url(pl.artwork.clone()), &tracks, loading, error, pl.permalink.clone(), back);
     }
@@ -337,24 +341,24 @@ impl Starlite {
         loading: bool,
         error: Option<String>,
         link: Option<String>,
-        back: bool,
+        back: Option<Server>,
     ) {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
 
         // Back to the server's playlists (a Navidrome playlist opened from there).
-        if back {
+        if let Some(s) = back {
             let c = pos2(content.left() + 19.0, 28.0 + 19.0);
-            if icon_button(ui, icons, els, ppp, Id::new("pl_back"), c, 38.0, "chevron-left", true, false, theme).on_hover_text("Back to Navidrome").clicked() {
+            if icon_button(ui, icons, els, ppp, Id::new("pl_back"), c, 38.0, "chevron-left", true, false, theme).on_hover_text(format!("Back to {}", s.name())).clicked() {
                 self.sound.click();
-                self.view = View::Navidrome;
+                self.view = View::Server(s);
                 return;
             }
         }
 
         // Header: cover, name, count, actions.
-        let art = Rect::from_min_size(pos2(content.left() + if back { 54.0 } else { 0.0 }, 28.0), Vec2::splat(120.0));
+        let art = Rect::from_min_size(pos2(content.left() + if back.is_some() { 54.0 } else { 0.0 }, 28.0), Vec2::splat(120.0));
         match &header {
             Header::Local(c) => playlist_cover(ui, icons, art, c, 18.0, theme),
             Header::Url(u) => cover(ui, icons, art, u.as_deref(), 18.0, "disc-3", theme),
@@ -585,9 +589,12 @@ impl Starlite {
         p.text(pos2(x0, 30.0), Align2::LEFT_TOP, "Settings", font(30.0, "bold"), theme.text());
 
         // Tabs: one glass strip with a glass highlight that slides between them.
-        const TABS: [&str; 5] = ["Appearance", "YouTube", "Mini player", "Lyrics", "Discord"];
+        const TABS: [&str; 9] = ["Appearance", "Playback", "Equalizer", "Effects", "Mini player", "Lyrics", "YouTube", "Discord", "Last.fm"];
         let f = font(13.5, "semibold");
-        let widths: Vec<f32> = TABS.iter().map(|t| p.layout_no_wrap(t.to_string(), f.clone(), theme.text()).size().x + 34.0).collect();
+        let text_w: Vec<f32> = TABS.iter().map(|t| p.layout_no_wrap(t.to_string(), f.clone(), theme.text()).size().x).collect();
+        // Less air between the names when the window is narrow.
+        let pad = ((content.width() - 8.0 - text_w.iter().sum::<f32>()) / TABS.len() as f32).clamp(14.0, 34.0);
+        let widths: Vec<f32> = text_w.iter().map(|w| w + pad).collect();
         let strip = Rect::from_min_size(pos2(x0, 88.0), vec2(widths.iter().sum::<f32>() + 8.0, 40.0));
         els.push(El::rect(strip, ppp, 20.0, 1.0, 6.0, Kind::Glass, 0.0, 0.0));
         let mut x = strip.left() + 4.0;
@@ -654,6 +661,14 @@ impl Starlite {
                 if self.theme == Theme::Custom {
                     y = self.custom_theme_settings(ui, icons, els, ppp, x0, y, content.width().min(540.0)) + 24.0;
                 }
+                let mut glass = self.look.liquid_glass;
+                let r = Rect::from_min_size(pos2(x0, y), vec2(content.width().min(520.0), 52.0));
+                if toggle_row(ui, r, Id::new("liquid_glass"), "Liquid glass", Some("Glass that bends and reflects what's behind it. Off: simple, flat panels"), &mut glass, theme) {
+                    self.sound.click();
+                    self.look.liquid_glass = glass;
+                    self.look.save();
+                }
+                y += 60.0;
                 let mut on = self.shelf.prefs.enabled;
                 let r = Rect::from_min_size(pos2(x0, y), vec2(content.width().min(520.0), 52.0));
                 if toggle_row(ui, r, Id::new("shelf_on"), "CD shelf", Some("Shows playlists as CD cases on a bookshelf"), &mut on, theme) {
@@ -662,10 +677,14 @@ impl Starlite {
                     self.shelf.prefs.save();
                 }
             }
-            1 => {
+            1 => self.playback_settings(ui, els, ppp, x0, top, content.width().min(560.0)),
+            2 => self.equalizer_settings(ui, icons, els, ppp, x0, top, content),
+            3 => self.effects_settings(ui, x0, top - 8.0, content),
+            6 => {
                 self.youtube_settings(ui, icons, els, ppp, x0, top, content.width().min(520.0));
             }
-            2 => {
+            8 => self.lastfm_settings(ui, icons, els, ppp, x0, top, content.width().min(560.0)),
+            4 => {
                 // Mini player: on / off and the customize mode.
                 let w = content.width().min(520.0);
                 let mut on = self.mini.prefs.enabled;
@@ -696,7 +715,7 @@ impl Starlite {
                     }
                 }
             }
-            3 => {
+            5 => {
                 // Lyrics: look them up online or only use the song's own.
                 let mut on = self.lprefs.online;
                 if toggle_row(ui, Rect::from_min_size(pos2(x0, top), vec2(content.width().min(520.0), 52.0)), Id::new("lyrics_online"), "Find lyrics online", Some("Gets timed lyrics for the song you're playing from lrclib.net"), &mut on, theme) {
@@ -961,7 +980,7 @@ fn card_row(
 /// A settings row: label (+ optional line under it) and an animated switch
 /// on the right. The whole row toggles. Returns true when it was flipped.
 #[allow(clippy::too_many_arguments)]
-fn toggle_row(ui: &mut Ui, r: Rect, id: Id, label: &str, sub: Option<&str>, on: &mut bool, theme: Theme) -> bool {
+pub fn toggle_row(ui: &mut Ui, r: Rect, id: Id, label: &str, sub: Option<&str>, on: &mut bool, theme: Theme) -> bool {
     let resp = ui.interact(r, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
     let ctx = ui.ctx().clone();
     let h = ctx.animate_bool_with_time(id.with("h"), resp.hovered(), 0.14);

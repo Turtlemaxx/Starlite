@@ -26,15 +26,58 @@ pub struct CustomTheme {
     pub text: [u8; 3],
     /// A picture behind everything (copied into the app's folder).
     pub image: Option<PathBuf>,
+    /// The quieter text colour, when the theme's CSS sets one.
+    #[serde(skip)]
+    pub text_dim: Option<[u8; 3]>,
 }
 
 impl Default for CustomTheme {
     fn default() -> Self {
-        Self { background: [22, 20, 34], accent: [150, 130, 255], text: [240, 238, 248], image: None }
+        Self { background: [22, 20, 34], accent: [150, 130, 255], text: [240, 238, 248], image: None, text_dim: None }
     }
 }
 
 static CUSTOM: RwLock<Option<CustomTheme>> = RwLock::new(None);
+
+/// The simple look is on (liquid glass off): plain greys for backgrounds.
+static FLAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// How the window is drawn (look.json).
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug, Default)]
+#[serde(default)]
+pub struct LookPrefs {
+    /// Glass that bends and reflects what's behind it. Off (the default):
+    /// simple flat panels.
+    pub liquid_glass: bool,
+}
+
+impl LookPrefs {
+    fn file() -> PathBuf {
+        crate::library::data_dir().join("look.json")
+    }
+    pub fn load() -> Self {
+        let mut p: Self = std::fs::read_to_string(Self::file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        // Debug: STARLITE_GLASS=1 / 0 forces liquid glass on / off.
+        if let Ok(v) = std::env::var("STARLITE_GLASS") {
+            p.liquid_glass = v != "0";
+        }
+        p.apply();
+        p
+    }
+    pub fn save(&self) {
+        let f = Self::file();
+        if let Some(d) = f.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(s) = serde_json::to_string_pretty(self) {
+            let _ = std::fs::write(f, s);
+        }
+        self.apply();
+    }
+    fn apply(&self) {
+        FLAT.store(!self.liquid_glass, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 impl CustomTheme {
     fn file() -> PathBuf {
@@ -107,7 +150,8 @@ pub fn import_bg_image(src: &std::path::Path) -> Option<PathBuf> {
         return None;
     }
     load_bg_image(src)?;
-    let dir = crate::library::data_dir().join("theme");
+    // (Not "theme": that's the name of the file the picked theme is saved in.)
+    let dir = crate::library::data_dir().join("backgrounds");
     std::fs::create_dir_all(&dir).ok()?;
     let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
     let dst = dir.join(format!("background-{t}.{ext}"));
@@ -175,7 +219,7 @@ impl Theme {
             Theme::Bubbles => Color32::from_rgb(146, 160, 178),
             Theme::Custom => {
                 let c = CustomTheme::get();
-                mix(c.text, c.background, 0.38)
+                c.text_dim.map(rgb).unwrap_or_else(|| mix(c.text, c.background, 0.38))
             }
         }
     }
@@ -206,7 +250,10 @@ impl Theme {
 
     /// The plain background colour (for painting over the background).
     pub fn background(self) -> Color32 {
+        let flat = FLAT.load(std::sync::atomic::Ordering::Relaxed);
         match self {
+            Theme::Light if flat => Color32::from_rgb(247, 247, 249),
+            Theme::Dark if flat => Color32::from_rgb(35, 35, 38),
             Theme::Light => Color32::from_rgb(240, 240, 242),
             Theme::Dark => Color32::from_rgb(26, 26, 28),
             Theme::Bubbles => Color32::from_rgb(8, 12, 20),
@@ -216,7 +263,7 @@ impl Theme {
     }
 
     fn file() -> Option<PathBuf> {
-        std::env::var("APPDATA").ok().map(|d| PathBuf::from(d).join("Starlite").join("theme"))
+        Some(crate::library::data_dir().join("theme"))
     }
 
     pub fn load() -> Theme {

@@ -21,6 +21,7 @@ use crate::library::{import_cover, Cover, Library, Source, Track, DOWNLOADED_ID,
 use crate::meta::Lyrics;
 use crate::player::{Action, Loop, NowPlaying, Player};
 use crate::sound::Sound;
+use crate::stream::Server;
 use crate::theme::Theme;
 use crate::widgets::{field, font, icon_button, pill, playlist_cover, text_trunc};
 use crate::youtube::{RemotePlaylist, YouTube};
@@ -41,17 +42,17 @@ pub enum View {
     Playlist(String),
     /// A YouTube playlist opened from Explore, or a Navidrome playlist.
     YtPlaylist,
-    /// Navidrome: connect, then the server's playlists.
-    Navidrome,
+    /// A music server (Navidrome, Jellyfin): connect, then its playlists.
+    Server(Server),
 }
 
 #[derive(Clone, PartialEq, Debug)]
 enum NavKey {
     Explore,
-    Navidrome,
+    Server(Server),
     Playlist(String),
-    /// A Navidrome playlist added to your playlists.
-    NdLink(String),
+    /// A server playlist added to your playlists.
+    NdLink(Server, String),
     Liked,
     Downloaded,
     Settings,
@@ -64,8 +65,8 @@ pub enum Job {
     Palette(String, Option<[[f32; 3]; 4]>),
     Lyrics(String, Option<Lyrics>),
     YtKeyTest(Result<(), String>),
-    NdConnect(Result<(), String>),
-    NdPlaylists(Result<Vec<RemotePlaylist>, String>),
+    SrvConnect(Server, Result<(), String>),
+    SrvPlaylists(Server, Result<Vec<RemotePlaylist>, String>),
     /// The custom theme's picture, read (for that path).
     BgImage(Option<PathBuf>, Option<crate::theme::BgImage>),
 }
@@ -98,8 +99,8 @@ pub struct ExploreState {
 
 pub struct RemoteView {
     pub pl: RemotePlaylist,
-    /// From Navidrome (else YouTube).
-    pub navidrome: bool,
+    /// The server it's from (None: YouTube).
+    pub server: Option<Server>,
     /// Opened from your playlists in the sidebar (no back button).
     pub linked: bool,
     pub tracks: Option<Result<Vec<Track>, String>>,
@@ -118,6 +119,7 @@ pub struct Dialog {
 
 /// The right-click menu on a Navidrome playlist.
 pub struct NdMenu {
+    pub server: Server,
     pub at: Pos2,
     pub pl: RemotePlaylist,
     pub open_t: f32,
@@ -155,6 +157,10 @@ pub struct Starlite {
     pub yt: Arc<YouTube>,
     pub nd: Arc<crate::navidrome::Navidrome>,
     pub ndst: NdState,
+    pub jf: Arc<crate::jellyfin::Jellyfin>,
+    pub jfst: NdState,
+    /// How server songs are asked for (as they are, or converted).
+    pub stream: crate::stream::StreamPrefs,
     pub settings_tab: usize,
     pub discord: crate::discord::Discord,
     pub dprefs: crate::discord::DiscordPrefs,
@@ -202,11 +208,27 @@ pub struct Starlite {
     pub popover: Option<Popover>,
     pub fx_pop: Option<FxPop>,
     pub nd_menu: Option<NdMenu>,
+    /// Goes up every time a song starts playing (also the same one again).
+    pub play_serial: u64,
+    /// The song lined up to follow the current one: (audio serial it follows, its place in the queue, its id).
+    pub lined_up: Option<(u64, usize, String)>,
+    pub sound_ui: crate::soundpage::SoundUi,
+    pub lastfm: crate::lastfm::LastFm,
+    pub lfm_ui: crate::lastfm::LfmUi,
+    last_advanced: u64,
     /// The custom theme's colours and picture.
     pub custom: crate::theme::CustomTheme,
     pub color_pick: Option<crate::customize::ColorPick>,
     /// Which picture the glass renderer has (None = not asked yet).
     bg_for: Option<Option<PathBuf>>,
+    /// Liquid glass or the simple look.
+    pub look: crate::theme::LookPrefs,
+    /// The Custom theme's CSS (theme.css), read again when the file changes.
+    pub css: crate::css::Css,
+    css_stamp: Option<std::time::SystemTime>,
+    css_checked: f64,
+    /// The font family in use from the CSS, and whether it was found.
+    pub css_font: Option<(String, bool)>,
     /// Speed and bass (sound.json).
     pub fx: crate::fx::FxPrefs,
     /// Playlist search: (which playlist, what's typed).
@@ -215,15 +237,21 @@ pub struct Starlite {
     pub time: f64,
 }
 
-fn install_fonts(ctx: &egui::Context) {
+/// Loads the three weights the app draws with: Segoe UI, or the font
+/// family a theme's CSS names (when it's installed).
+fn install_fonts(ctx: &egui::Context, family: Option<&str>) -> bool {
     let mut fonts = FontDefinitions::default();
     let dir = std::env::var("WINDIR")
         .map(|w| PathBuf::from(w).join("Fonts"))
         .unwrap_or_else(|_| PathBuf::from(r"C:\Windows\Fonts"));
+    let custom = family.and_then(|f| crate::css::pick_fonts(&crate::win::font_table(), f));
+    let found = custom.is_some();
+    let files = custom.unwrap_or_else(|| ["segoeui.ttf".into(), "seguisb.ttf".into(), "segoeuib.ttf".into()]);
     let base = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
-    for (name, file) in [("regular", "segoeui.ttf"), ("semibold", "seguisb.ttf"), ("bold", "segoeuib.ttf")] {
+    for (name, file) in ["regular", "semibold", "bold"].into_iter().zip(files) {
         let mut fam = base.clone();
-        if let Ok(bytes) = std::fs::read(dir.join(file)) {
+        // A bare file name is in Windows' Fonts folder; per-user fonts come with their path.
+        if let Ok(bytes) = std::fs::read(dir.join(&file)) {
             fonts.font_data.insert(name.into(), Arc::new(FontData::from_owned(bytes)));
             fam.insert(0, name.into());
         }
@@ -231,6 +259,7 @@ fn install_fonts(ctx: &egui::Context) {
         fonts.families.insert(key, fam);
     }
     ctx.set_fonts(fonts);
+    found
 }
 
 const DEFAULT_PALETTE: [[f32; 3]; 4] = [[0.36, 0.30, 0.62], [0.20, 0.32, 0.58], [0.55, 0.25, 0.42], [0.25, 0.22, 0.40]];
@@ -378,7 +407,7 @@ impl Starlite {
             _ => None,
         });
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        install_fonts(&cc.egui_ctx);
+        install_fonts(&cc.egui_ctx, None);
         cc.egui_ctx.options_mut(|o| o.repaint_on_widget_change = false);
         let audio = Audio::new(cc.egui_ctx.clone());
         let player = Player::new();
@@ -410,7 +439,10 @@ impl Starlite {
             yt: Arc::new(YouTube::new()),
             nd: Arc::new(crate::navidrome::Navidrome::load()),
             ndst: NdState::default(),
-            // Debug: STARLITE_SETTINGS_TAB=0..4 opens that Settings tab.
+            jf: Arc::new(crate::jellyfin::Jellyfin::load()),
+            jfst: NdState::default(),
+            stream: crate::stream::StreamPrefs::load(),
+            // Debug: STARLITE_SETTINGS_TAB=0..8 opens that Settings tab.
             settings_tab: std::env::var("STARLITE_SETTINGS_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             discord: crate::discord::Discord::start(),
             dc_id_input: crate::discord::DiscordPrefs::load().app_id,
@@ -426,7 +458,8 @@ impl Starlite {
                 Ok("settings") => View::Settings,
                 Ok("liked") => View::Playlist(LIKED_ID.into()),
                 Ok("downloaded") => View::Playlist(DOWNLOADED_ID.into()),
-                Ok("navidrome") => View::Navidrome,
+                Ok("navidrome") => View::Server(Server::Navidrome),
+                Ok("jellyfin") => View::Server(Server::Jellyfin),
                 _ => View::Explore,
             },
             sel: None,
@@ -447,9 +480,20 @@ impl Starlite {
             popover: None,
             fx_pop: None,
             nd_menu: None,
+            play_serial: 0,
+            lined_up: None,
+            sound_ui: Default::default(),
+            lastfm: crate::lastfm::LastFm::start(),
+            lfm_ui: Default::default(),
+            last_advanced: 0,
             custom: crate::theme::CustomTheme::get(),
             color_pick: None,
             bg_for: None,
+            look: crate::theme::LookPrefs::load(),
+            css: Default::default(),
+            css_stamp: None,
+            css_checked: -10.0,
+            css_font: None,
             fx: crate::fx::FxPrefs::load(),
             pl_search: (String::new(), String::new()),
             toast: None,
@@ -486,18 +530,22 @@ impl Starlite {
             app.play_list(list, 0);
         }
         app.audio.set_speed(app.fx.speed);
-        app.audio.bass.set(app.fx.bass);
+        app.audio.set_fx(&app.fx);
         app.apply_theme(&cc.egui_ctx);
         if app.yt.configured() {
             app.load_explore(&cc.egui_ctx);
         }
-        // Debug: STARLITE_ND_CONNECT=url|user|password connects to Navidrome at start.
-        if let Ok(v) = std::env::var("STARLITE_ND_CONNECT") {
-            let mut it = v.splitn(3, '|');
-            app.ndst.url = it.next().unwrap_or_default().to_string();
-            app.ndst.user = it.next().unwrap_or_default().to_string();
-            app.ndst.pass = it.next().unwrap_or_default().to_string();
-            app.connect_navidrome(&cc.egui_ctx);
+        // Debug: STARLITE_ND_CONNECT / STARLITE_JF_CONNECT=url|user|password connect to a
+        // (test) Navidrome / Jellyfin server at start.
+        for (var, srv) in [("STARLITE_ND_CONNECT", Server::Navidrome), ("STARLITE_JF_CONNECT", Server::Jellyfin)] {
+            if let Ok(v) = std::env::var(var) {
+                let mut it = v.splitn(3, '|');
+                let st = app.st(srv);
+                st.url = it.next().unwrap_or_default().to_string();
+                st.user = it.next().unwrap_or_default().to_string();
+                st.pass = it.next().unwrap_or_default().to_string();
+                app.connect_server(&cc.egui_ctx, srv);
+            }
         }
         // Debug: STARLITE_YT_VIDEO=<id> starts that YouTube video.
         if let Ok(id) = std::env::var("STARLITE_YT_VIDEO") {
@@ -531,7 +579,7 @@ impl Starlite {
 
     pub fn open_yt_playlist(&mut self, ctx: &egui::Context, pl: RemotePlaylist) {
         let id = pl.id.clone();
-        self.remote = Some(RemoteView { pl, navidrome: false, linked: false, tracks: None });
+        self.remote = Some(RemoteView { pl, server: None, linked: false, tracks: None });
         self.view = View::YtPlaylist;
         let (yt, tx, ctx) = (self.yt.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
@@ -541,43 +589,137 @@ impl Starlite {
         });
     }
 
-    /// Checks the Navidrome login on a worker thread.
-    pub fn connect_navidrome(&mut self, ctx: &egui::Context) {
-        if self.ndst.busy {
+    /// Where the Custom theme's CSS lives.
+    pub fn css_file() -> PathBuf {
+        crate::library::data_dir().join("theme.css")
+    }
+
+    /// The Custom theme's colours with its CSS on top (what's drawn).
+    pub fn effective_custom(&self) -> crate::theme::CustomTheme {
+        let mut c = self.custom.clone();
+        c.background = self.css.background.unwrap_or(c.background);
+        c.accent = self.css.accent.unwrap_or(c.accent);
+        c.text = self.css.text.unwrap_or(c.text);
+        c.text_dim = self.css.text_dim;
+        c
+    }
+
+    /// The Custom theme's picture: the CSS's if it names one, else the picked one.
+    pub fn custom_picture(&self) -> Option<PathBuf> {
+        match &self.css.image {
+            Some(p) => p.clone(),
+            None => self.custom.image.clone(),
+        }
+    }
+
+    /// Reads theme.css again when it was saved (looked at once a second).
+    fn watch_css(&mut self, ctx: &egui::Context) {
+        if self.time - self.css_checked < 1.0 {
             return;
         }
-        self.ndst.busy = true;
-        self.ndst.error = None;
-        let (nd, tx, ctx) = (self.nd.clone(), self.jobs_tx.clone(), ctx.clone());
-        let (url, user, pass) = (self.ndst.url.clone(), self.ndst.user.clone(), self.ndst.pass.clone());
+        self.css_checked = self.time;
+        let stamp = std::fs::metadata(Self::css_file()).and_then(|m| m.modified()).ok();
+        if stamp == self.css_stamp {
+            return;
+        }
+        self.css_stamp = stamp;
+        self.css = std::fs::read_to_string(Self::css_file()).map(|t| crate::css::parse(&t)).unwrap_or_default();
+        // A font it names (back to Segoe UI when it names none).
+        let family = self.css.font.clone();
+        if family != self.css_font.as_ref().map(|f| f.0.clone()) {
+            let found = install_fonts(ctx, family.as_deref());
+            self.css_font = family.map(|f| (f, found));
+        }
+        self.custom_changed(ctx, false);
+        ctx.request_repaint();
+    }
+
+    /// The page state of a server.
+    pub fn st(&mut self, s: Server) -> &mut NdState {
+        match s {
+            Server::Navidrome => &mut self.ndst,
+            Server::Jellyfin => &mut self.jfst,
+        }
+    }
+
+    /// (server URL, user name) when connected to it.
+    pub fn server_connected(&self, s: Server) -> Option<(String, String)> {
+        match s {
+            Server::Navidrome => self.nd.connected(),
+            Server::Jellyfin => self.jf.connected(),
+        }
+    }
+
+    /// Checks a server login on a worker thread.
+    pub fn connect_server(&mut self, ctx: &egui::Context, s: Server) {
+        if self.st(s).busy {
+            return;
+        }
+        let st = self.st(s);
+        st.busy = true;
+        st.error = None;
+        let (url, user, pass) = (st.url.clone(), st.user.clone(), st.pass.clone());
+        let (nd, jf, tx, ctx) = (self.nd.clone(), self.jf.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(Job::NdConnect(nd.connect(&url, &user, &pass)));
+            let r = match s {
+                Server::Navidrome => nd.connect(&url, &user, &pass),
+                Server::Jellyfin => jf.connect(&url, &user, &pass),
+            };
+            let _ = tx.send(Job::SrvConnect(s, r));
             ctx.request_repaint();
         });
     }
 
-    pub fn load_navidrome(&mut self, ctx: &egui::Context) {
-        if self.ndst.loading {
+    pub fn disconnect_server(&mut self, s: Server) {
+        match s {
+            Server::Navidrome => self.nd.disconnect(),
+            Server::Jellyfin => {
+                // Signing out tells the server; don't hold the window up for it.
+                let jf = self.jf.clone();
+                std::thread::spawn(move || jf.disconnect());
+            }
+        }
+        *self.st(s) = Default::default();
+    }
+
+    pub fn load_server(&mut self, ctx: &egui::Context, s: Server) {
+        if self.st(s).loading {
             return;
         }
-        self.ndst.loading = true;
-        let (nd, tx, ctx) = (self.nd.clone(), self.jobs_tx.clone(), ctx.clone());
+        self.st(s).loading = true;
+        let (nd, jf, tx, ctx) = (self.nd.clone(), self.jf.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let _ = tx.send(Job::NdPlaylists(nd.playlists()));
+            let r = match s {
+                Server::Navidrome => nd.playlists(),
+                Server::Jellyfin => jf.playlists(),
+            };
+            let _ = tx.send(Job::SrvPlaylists(s, r));
             ctx.request_repaint();
         });
     }
 
-    pub fn open_nd_playlist(&mut self, ctx: &egui::Context, pl: RemotePlaylist, linked: bool) {
+    pub fn open_server_playlist(&mut self, ctx: &egui::Context, s: Server, pl: RemotePlaylist, linked: bool) {
         let id = pl.id.clone();
-        self.remote = Some(RemoteView { pl, navidrome: true, linked, tracks: None });
+        self.remote = Some(RemoteView { pl, server: Some(s), linked, tracks: None });
         self.view = View::YtPlaylist;
-        let (nd, tx, ctx) = (self.nd.clone(), self.jobs_tx.clone(), ctx.clone());
+        let (nd, jf, tx, ctx) = (self.nd.clone(), self.jf.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
-            let r = nd.playlist_tracks(&id);
+            let r = match s {
+                Server::Navidrome => nd.playlist_tracks(&id),
+                Server::Jellyfin => jf.playlist_tracks(&id),
+            };
             let _ = tx.send(Job::YtPlaylist(id, r));
             ctx.request_repaint();
         });
+    }
+
+    /// The link a server song streams from (None: not a server song, or not connected).
+    pub fn stream_for(&self, t: &Track) -> Option<String> {
+        match &t.source {
+            Source::Navidrome { song_id, suffix } => self.nd.stream_url(song_id, suffix, &self.stream),
+            Source::Jellyfin { item_id } => self.jf.stream_url(item_id, &self.stream),
+            _ => None,
+        }
     }
 
     /// Plays a list in random order.
@@ -610,7 +752,7 @@ impl Starlite {
                 Job::YtPlaylist(id, r) => {
                     if let Some(v) = self.remote.as_mut().filter(|v| v.pl.id == id) {
                         if let (Ok(list), Ok(n)) = (&r, std::env::var("STARLITE_ND_PLAY")) {
-                            if v.navidrome {
+                            if v.server.is_some() {
                                 let list = list.clone();
                                 v.tracks = Some(r);
                                 self.play_list(list, n.parse().unwrap_or(0));
@@ -650,44 +792,46 @@ impl Starlite {
                         Err(e) => self.yt_status = Some((false, e)),
                     }
                 }
-                Job::NdConnect(r) => {
-                    self.ndst.busy = false;
+                Job::SrvConnect(s, r) => {
+                    self.st(s).busy = false;
                     match r {
                         Ok(()) => {
-                            self.ndst.pass.clear();
-                            self.ndst.error = None;
-                            self.ndst.loaded = false;
-                            self.load_navidrome(ctx);
+                            let st = self.st(s);
+                            st.pass.clear();
+                            st.error = None;
+                            st.loaded = false;
+                            self.load_server(ctx, s);
                         }
-                        Err(e) => self.ndst.error = Some(e),
+                        Err(e) => self.st(s).error = Some(e),
                     }
                 }
-                Job::NdPlaylists(r) => {
-                    self.ndst.loading = false;
-                    self.ndst.loaded = true;
+                Job::SrvPlaylists(s, r) => {
+                    self.st(s).loading = false;
+                    self.st(s).loaded = true;
                     match r {
                         Ok(p) => {
-                            self.lib.refresh_nd_links(&p);
+                            self.lib.refresh_nd_links(s, &p);
                             // Debug: STARLITE_ND_MENU=x,y opens the first playlist's right-click menu there.
                             if let Some((x, y)) = std::env::var("STARLITE_ND_MENU").ok().and_then(|v| {
                                 let (x, y) = v.split_once(',')?;
                                 Some((x.trim().parse::<f32>().ok()?, y.trim().parse::<f32>().ok()?))
                             }) {
                                 if let Some(first) = p.first().cloned() {
-                                    self.nd_menu = Some(NdMenu { at: pos2(x, y), pl: first, open_t: 0.0 });
+                                    self.nd_menu = Some(NdMenu { server: s, at: pos2(x, y), pl: first, open_t: 0.0 });
                                 }
                             }
                             // Debug: STARLITE_ND_PLAY=<n> opens the first playlist and plays song n
                             // (STARLITE_ND_OPEN=1 only opens it).
                             if std::env::var("STARLITE_ND_PLAY").is_ok() || std::env::var("STARLITE_ND_OPEN").is_ok() {
                                 if let Some(first) = p.first().cloned() {
-                                    self.open_nd_playlist(ctx, first, false);
+                                    self.open_server_playlist(ctx, s, first, false);
                                 }
                             }
-                            self.ndst.playlists = p;
-                            self.ndst.error = None;
+                            let st = self.st(s);
+                            st.playlists = p;
+                            st.error = None;
                         }
-                        Err(e) => self.ndst.error = Some(e),
+                        Err(e) => self.st(s).error = Some(e),
                     }
                 }
                 Job::YtKeyTest(r) => {
@@ -719,6 +863,7 @@ impl Starlite {
     /// Start a song on the right engine: YouTube's player or the audio engine.
     pub fn play_track(&mut self, t: Track) {
         self.now = Some(t.clone());
+        self.play_serial += 1;
         if let Some(id) = t.youtube_id() {
             self.audio.stop();
             let vol = self.player.effective_volume();
@@ -730,16 +875,14 @@ impl Starlite {
             if let Some(p) = self.ytp.as_mut() {
                 p.stop();
             }
-            let stream = match &t.source {
-                Source::Navidrome { song_id, suffix } => {
-                    let u = self.nd.stream_url(song_id, suffix);
-                    if u.is_none() {
-                        self.toast("Connect to Navidrome to play this song");
-                    }
-                    u
+            let stream = self.stream_for(&t);
+            if stream.is_none() {
+                match t.source {
+                    Source::Navidrome { .. } => self.toast("Connect to Navidrome to play this song"),
+                    Source::Jellyfin { .. } => self.toast("Connect to Jellyfin to play this song"),
+                    _ => {}
                 }
-                _ => None,
-            };
+            }
             self.audio.play(t, stream);
         }
     }
@@ -889,25 +1032,60 @@ impl Starlite {
         });
     }
 
-    fn step(&mut self, forward: bool, auto: bool) {
-        if self.queue.is_empty() {
-            return;
-        }
+    /// Which song of the queue comes after the current one (None: the end).
+    /// `auto`: the song ended by itself (loop-one repeats it).
+    fn following(&self, forward: bool, auto: bool) -> Option<usize> {
         let n = self.queue.len();
+        if n == 0 {
+            return None;
+        }
         if auto && self.player.looping == Loop::One {
-            // replay the same song
+            Some(self.qi.min(n - 1))
         } else if forward {
             if self.qi + 1 < n {
-                self.qi += 1;
+                Some(self.qi + 1)
             } else if !auto || self.player.looping == Loop::All {
-                self.qi = 0;
+                Some(0)
             } else {
-                return; // end of the queue
+                None
             }
         } else {
-            self.qi = self.qi.saturating_sub(1);
+            Some(self.qi.saturating_sub(1))
         }
-        self.play_track(self.queue[self.qi].clone());
+    }
+
+    fn step(&mut self, forward: bool, auto: bool) {
+        if let Some(i) = self.following(forward, auto) {
+            self.qi = i;
+            self.play_track(self.queue[i].clone());
+        }
+    }
+
+    /// Keeps the song that follows lined up in the audio engine, so it
+    /// starts without a gap (or with the crossfade). YouTube songs can't be.
+    fn line_up_next(&mut self) {
+        let playing = !self.now_is_youtube() && matches!(self.audio.status(), Status::Playing | Status::Paused);
+        if !playing {
+            self.lined_up = None;
+            return;
+        }
+        let serial = self.audio.serial();
+        let want = self.following(true, true).filter(|&i| self.queue[i].youtube_id().is_none()).map(|i| (serial, i, self.queue[i].id.clone()));
+        if want == self.lined_up {
+            return;
+        }
+        match &want {
+            Some((_, i, _)) => {
+                let t = self.queue[*i].clone();
+                match (self.stream_for(&t), &t.source) {
+                    // A server song without its server can't be loaded.
+                    (None, Source::Navidrome { .. } | Source::Jellyfin { .. }) => self.audio.clear_next(),
+                    (stream, _) => self.audio.preload(t, stream),
+                }
+            }
+            None => self.audio.clear_next(),
+        }
+        self.lined_up = want;
     }
 
     pub fn current_track(&self) -> Option<Track> {
@@ -933,8 +1111,10 @@ impl Starlite {
         let logo = lerp_rect(Rect::from_center_size(pos2(w * 0.5, 46.0), Vec2::splat(56.0)), Rect::from_min_size(pos2(18.0, 14.0), Vec2::splat(74.0)), t);
         let mut rows = vec![(NavKey::Explore, row(98.0, 92.0))];
         let nd_y = lerp(144.0, 140.0, t);
-        rows.push((NavKey::Navidrome, row(nd_y, nd_y)));
-        let shift = lerp(52.0, 46.0, t);
+        rows.push((NavKey::Server(Server::Navidrome), row(nd_y, nd_y)));
+        let jf_y = lerp(196.0, 182.0, t);
+        rows.push((NavKey::Server(Server::Jellyfin), row(jf_y, jf_y)));
+        let shift = lerp(104.0, 88.0, t);
         let header = Rect::from_min_size(pos2(24.0, lerp(146.0, 150.0, t) + shift), vec2((w - 48.0).max(1.0), 22.0));
         let plus = pos2(lerp(w * 0.5, w - 30.0, t), lerp(158.0, 161.0, t) + shift);
 
@@ -950,7 +1130,7 @@ impl Starlite {
         let list_top = lerp(184.0, 178.0, t) + shift;
         let list_clip = Rect::from_min_max(pos2(0.0, list_top - 2.0), pos2(w, (liked.top() - 10.0).max(list_top)));
         let pitch = lerp(52.0, 42.0, t);
-        let keys = self.lib.user_playlists().map(|p| NavKey::Playlist(p.id.clone())).chain(self.lib.nd_links.iter().map(|l| NavKey::NdLink(l.id.clone())));
+        let keys = self.lib.user_playlists().map(|p| NavKey::Playlist(p.id.clone())).chain(self.lib.nd_links.iter().map(|l| NavKey::NdLink(l.server, l.id.clone())));
         for (i, k) in keys.enumerate() {
             let y = list_top + i as f32 * pitch - self.nav_scroll;
             rows.push((k, row(y, y)));
@@ -968,10 +1148,12 @@ impl Starlite {
             View::Playlist(id) if id == LIKED_ID => Some(NavKey::Liked),
             View::Playlist(id) if id == DOWNLOADED_ID => Some(NavKey::Downloaded),
             View::Playlist(id) => Some(NavKey::Playlist(id.clone())),
-            View::Navidrome => Some(NavKey::Navidrome),
-            View::YtPlaylist if self.remote.as_ref().is_some_and(|r| r.navidrome && r.linked) => self.remote.as_ref().map(|r| NavKey::NdLink(r.pl.id.clone())),
-            View::YtPlaylist if self.remote.as_ref().is_some_and(|r| r.navidrome) => Some(NavKey::Navidrome),
-            View::YtPlaylist => None,
+            View::Server(s) => Some(NavKey::Server(*s)),
+            View::YtPlaylist => match self.remote.as_ref() {
+                Some(RemoteView { server: Some(s), linked: true, pl, .. }) => Some(NavKey::NdLink(*s, pl.id.clone())),
+                Some(RemoteView { server: Some(s), .. }) => Some(NavKey::Server(*s)),
+                _ => None,
+            },
         }
     }
 
@@ -1017,9 +1199,9 @@ impl Starlite {
         let mut hover_el = None;
         let mut sel_press = 0.0;
         let mut clicked: Option<NavKey> = None;
-        let mut right_clicked: Option<(RemotePlaylist, Pos2)> = None;
+        let mut right_clicked: Option<(Server, RemotePlaylist, Pos2)> = None;
         for (key, rect) in &lay.rows {
-            let in_list = matches!(key, NavKey::Playlist(_) | NavKey::NdLink(_));
+            let in_list = matches!(key, NavKey::Playlist(_) | NavKey::NdLink(..));
             if in_list && (rect.bottom() < lay.list_clip.top() || rect.top() > lay.list_clip.bottom()) {
                 continue;
             }
@@ -1041,22 +1223,22 @@ impl Starlite {
             if resp.clicked() && !is_sel {
                 clicked = Some(key.clone());
             }
-            if let NavKey::NdLink(lid) = key {
+            if let NavKey::NdLink(srv, lid) = key {
                 if resp.secondary_clicked() {
-                    if let (Some(l), Some(at)) = (self.lib.nd_link(lid), resp.interact_pointer_pos()) {
-                        right_clicked = Some((l.to_remote(), at));
+                    if let (Some(l), Some(at)) = (self.lib.nd_link(*srv, lid), resp.interact_pointer_pos()) {
+                        right_clicked = Some((*srv, l.to_remote(), at));
                     }
                 }
             }
 
             let name: String = match key {
                 NavKey::Explore => "Explore".into(),
-                NavKey::Navidrome => "Navidrome".into(),
+                NavKey::Server(s) => s.name().into(),
                 NavKey::Settings => "Settings".into(),
                 NavKey::Liked => "Liked Music".into(),
                 NavKey::Downloaded => "Downloaded Music".into(),
                 NavKey::Playlist(pid) => self.lib.playlists.iter().find(|p| &p.id == pid).map(|p| p.name.clone()).unwrap_or_default(),
-                NavKey::NdLink(lid) => self.lib.nd_link(lid).map(|l| l.title.clone()).unwrap_or_default(),
+                NavKey::NdLink(srv, lid) => self.lib.nd_link(*srv, lid).map(|l| l.title.clone()).unwrap_or_default(),
             };
             if label_a < 0.5 {
                 resp.on_hover_text(name.clone());
@@ -1066,7 +1248,7 @@ impl Starlite {
             let lead_c = pos2(lerp(rect.center().x, rect.left() + 22.0, t), rect.center().y);
             let icon: Option<&'static str> = match key {
                 NavKey::Explore => Some("compass"),
-                NavKey::Navidrome => Some("cloudy"),
+                NavKey::Server(s) => Some(s.icon()),
                 NavKey::Settings => Some("settings"),
                 NavKey::Liked => Some(if is_sel { "heart-fill" } else { "heart" }),
                 NavKey::Downloaded => Some("download"),
@@ -1080,13 +1262,13 @@ impl Starlite {
                     }
                     None
                 }
-                NavKey::NdLink(lid) => {
-                    if let Some(l) = self.lib.nd_link(lid) {
+                NavKey::NdLink(srv, lid) => {
+                    if let Some(l) = self.lib.nd_link(*srv, lid) {
                         let c = Rect::from_center_size(lead_c, Vec2::splat(lerp(34.0, 26.0, t)));
                         let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(lay.list_clip));
                         cu.set_clip_rect(lay.list_clip);
                         let art = l.artwork.clone();
-                        crate::widgets::cover(&cu, icons, c, art.as_deref(), 7.0, "cloudy", theme);
+                        crate::widgets::cover(&cu, icons, c, art.as_deref(), 7.0, srv.icon(), theme);
                     }
                     None
                 }
@@ -1131,7 +1313,7 @@ impl Starlite {
             let stretch = (self.sel_v.abs() * 0.03).min(16.0);
             let squeeze = (self.sel_v.abs() * 0.008).min(6.0);
             let mut pill_r = Rect::from_center_size(cur.center(), vec2(cur.width() - squeeze + 4.0 * sel_press, cur.height() + stretch + 4.0 * sel_press));
-            if matches!(selected, Some(NavKey::Playlist(_) | NavKey::NdLink(_))) {
+            if matches!(selected, Some(NavKey::Playlist(_) | NavKey::NdLink(..))) {
                 pill_r = pill_r.intersect(lay.list_clip);
             }
             if self.sel_vis > 0.002 && pill_r.width() > 1.0 && pill_r.height() > 1.0 {
@@ -1151,14 +1333,14 @@ impl Starlite {
             self.nav_open = !self.nav_open;
         }
 
-        if let Some((pl, at)) = right_clicked {
+        if let Some((server, pl, at)) = right_clicked {
             self.sound.click();
-            self.nd_menu = Some(NdMenu { at, pl, open_t: 0.0 });
+            self.nd_menu = Some(NdMenu { server, at, pl, open_t: 0.0 });
         }
-        if let Some(NavKey::NdLink(lid)) = &clicked {
+        if let Some(NavKey::NdLink(srv, lid)) = &clicked {
             self.sound.click();
-            if let Some(pl) = self.lib.nd_link(lid).map(|l| l.to_remote()) {
-                self.open_nd_playlist(&ctx, pl, true);
+            if let Some(pl) = self.lib.nd_link(*srv, lid).map(|l| l.to_remote()) {
+                self.open_server_playlist(&ctx, *srv, pl, true);
             }
             return;
         }
@@ -1166,11 +1348,11 @@ impl Starlite {
             self.sound.click();
             self.view = match k {
                 NavKey::Explore => View::Explore,
-                NavKey::Navidrome => {
-                    if self.nd.connected().is_some() && !self.ndst.loaded {
-                        self.load_navidrome(&ctx);
+                NavKey::Server(s) => {
+                    if self.server_connected(s).is_some() && !self.st(s).loaded {
+                        self.load_server(&ctx, s);
                     }
-                    View::Navidrome
+                    View::Server(s)
                 }
                 NavKey::Settings => View::Settings,
                 NavKey::Liked => View::Playlist(LIKED_ID.into()),
@@ -1179,7 +1361,7 @@ impl Starlite {
                     View::Playlist(DOWNLOADED_ID.into())
                 }
                 NavKey::Playlist(id) => View::Playlist(id),
-                NavKey::NdLink(_) => View::Navidrome,
+                NavKey::NdLink(s, _) => View::Server(s),
             };
         }
     }
@@ -1187,6 +1369,11 @@ impl Starlite {
     // ── Overlays ───────────────────────────────────────────────────
 
     pub fn base_frame(&self, full: Rect, ppp: f32, time: f32, nav_w: f32) -> Frame {
+        // The Custom theme as drawn: its colours with the CSS on top.
+        let custom = crate::theme::CustomTheme::get();
+        let css = (self.theme == Theme::Custom).then_some(&self.css);
+        let flat = !self.look.liquid_glass;
+        let unset = [0.0, 0.0, 0.0, -1.0];
         Frame {
             res: [full.width() * ppp, full.height() * ppp],
             ppp,
@@ -1201,9 +1388,15 @@ impl Starlite {
             dim: 0.0,
             fs: smooth(self.fs_t),
             palette: self.palette,
-            custom_bg: rgb_f(self.custom.background),
-            accent: rgb_f(self.custom.accent),
-            light_ui: self.custom.is_light(),
+            custom_bg: rgb_f(custom.background),
+            accent: rgb_f(custom.accent),
+            light_ui: custom.is_light(),
+            flat,
+            fills: [css.and_then(|c| c.panel).unwrap_or(unset), css.and_then(|c| c.sidebar).unwrap_or(unset), css.and_then(|c| c.player).unwrap_or(unset)],
+            edge: css.and_then(|c| c.border).unwrap_or(unset),
+            // The simple look has calmer corners; liquid glass keeps its own.
+            round: css.and_then(|c| c.radius).unwrap_or(if flat { 14.0 } else { 1000.0 }),
+            frost: css.and_then(|c| c.blur).unwrap_or(16.0),
         }
     }
 
@@ -1473,7 +1666,7 @@ impl Starlite {
 }
 
 impl Starlite {
-    /// Right-click menu on a Navidrome playlist: add it to your playlists
+    /// Right-click menu on a server playlist: add it to your playlists
     /// (or take it away again).
     #[allow(clippy::too_many_arguments)]
     fn draw_nd_menu(&mut self, ui: &mut egui::Ui, icons: &mut Icons, ppp: f32, dt: f32, full: Rect, time: f32, nav_w: f32, animating: &mut bool) {
@@ -1484,8 +1677,8 @@ impl Starlite {
             *animating = true;
         }
         let ot = smooth(m.open_t);
-        let (at, pl) = (m.at, m.pl.clone());
-        let linked = self.lib.nd_link(&pl.id).is_some();
+        let (server, at, pl) = (m.server, m.at, m.pl.clone());
+        let linked = self.lib.nd_link(server, &pl.id).is_some();
         let back = ui.interact(full, ui.id().with("ndm_back"), Sense::click());
         let label = if linked { "Remove from your playlists" } else { "Add to your playlists" };
         let w = ui.painter().layout_no_wrap(label.to_string(), font(13.5, "semibold"), theme.text()).size().x + 70.0;
@@ -1511,11 +1704,11 @@ impl Starlite {
 
         if resp.clicked() {
             self.sound.click();
-            let added = self.lib.toggle_nd_link(&pl);
+            let added = self.lib.toggle_nd_link(server, &pl);
             self.toast(if added { format!("Added {} to your playlists", pl.title) } else { format!("Removed {} from your playlists", pl.title) });
             // Taken away while open from the sidebar: it's now a plain Navidrome playlist.
             if !added {
-                if let Some(rv) = self.remote.as_mut().filter(|rv| rv.navidrome && rv.pl.id == pl.id) {
+                if let Some(rv) = self.remote.as_mut().filter(|rv| rv.server == Some(server) && rv.pl.id == pl.id) {
                     rv.linked = false;
                 }
             }
@@ -1607,6 +1800,23 @@ impl eframe::App for Starlite {
 
         self.poll_jobs(ctx);
 
+        // The engine moved on to the lined-up song by itself (gapless / crossfade).
+        let (advanced, on) = self.audio.advanced();
+        if advanced != self.last_advanced {
+            self.last_advanced = advanced;
+            if let Some(t) = on {
+                if let Some(i) = self.lined_up.as_ref().map(|l| l.1).filter(|&i| self.queue.get(i).is_some_and(|q| q.id == t.id)).or_else(|| self.queue.iter().position(|q| q.id == t.id)) {
+                    self.qi = i;
+                }
+                self.now = Some(t);
+                self.play_serial += 1;
+                if self.palette_for.as_ref() == self.now.as_ref().map(|t| &t.id) {
+                    // The same song again (loop one): its lyrics start over.
+                    self.lyric_scroll = Default::default();
+                }
+            }
+        }
+        self.line_up_next();
         // Playback events: song ended → next; errors → toast.
         let finished = self.audio.finished();
         if finished != self.last_finished {
@@ -1690,8 +1900,12 @@ impl eframe::App for Starlite {
         let nav_w = lerp(NAV_MINI, NAV_FULL, smooth(self.nav_t));
 
         // The custom theme's picture, read off the UI thread.
-        if theme == Theme::Custom && self.bg_for.as_ref() != Some(&self.custom.image) {
-            let path = self.custom.image.clone();
+        if theme == Theme::Custom {
+            self.watch_css(ctx);
+        }
+        let picture = self.custom_picture();
+        if theme == Theme::Custom && self.bg_for.as_ref() != Some(&picture) {
+            let path = picture;
             self.bg_for = Some(path.clone());
             let (tx, c) = (self.jobs_tx.clone(), ctx.clone());
             std::thread::spawn(move || {
@@ -1730,7 +1944,7 @@ impl eframe::App for Starlite {
 
             if !in_fs {
                 // The nav bar: clear glass over the one window-wide background.
-                els.push(El::rect(Rect::from_min_max(pos2(-80.0, -80.0), pos2(nav_w, full.bottom() + 80.0)), ppp, 26.0, 1.0, 6.0, Kind::Glass, 0.0, 0.0).with_value(1.0));
+                els.push(El::rect(Rect::from_min_max(pos2(-80.0, -80.0), pos2(nav_w, full.bottom() + 80.0)), ppp, 26.0, 1.0, 6.0, Kind::Glass, 0.0, 0.0).with_value(1.0).with_class(crate::glass::Class::Sidebar));
                 self.draw_nav(ui, &mut icons, &mut els, ppp, dt, full, nav_w, &mut animating);
             }
 
@@ -1858,6 +2072,9 @@ impl eframe::App for Starlite {
             let playing = matches!(self.playback_status(), Status::Playing | Status::Loading);
             let now = self.now.clone();
             self.discord.update(&self.dprefs, now.as_ref(), playing, pos, dur);
+            // Last.fm: now playing, and a scrobble once enough of the song was heard.
+            let heard = self.playback_status() == Status::Playing;
+            self.lastfm.update(now.as_ref(), self.play_serial, heard);
         }
 
         if !ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {
@@ -1871,6 +2088,9 @@ impl eframe::App for Starlite {
             33
         } else if self.playback_status() == Status::Playing {
             250
+        } else if self.theme == Theme::Custom && self.view == View::Settings {
+            // Editing the theme's CSS: notice when the file is saved.
+            1000
         } else {
             0
         };

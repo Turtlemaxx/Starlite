@@ -161,7 +161,8 @@ impl Player {
             demo,
             looping: if demo { Loop::One } else { Loop::Off },
             volume: 0.7,
-            muted: false,
+            // Debug: STARLITE_MUTE=1 starts muted (silent test runs).
+            muted: std::env::var("STARLITE_MUTE").is_ok(),
             morph: 0.0,
             vol_shown: 0.7,
             knob: 0.0,
@@ -230,7 +231,7 @@ impl Player {
         }
         let seek_hover_ok = seek.hover_pos().is_some_and(|p| !on_controls(p, &self.controls));
         let progress = self.scrub.unwrap_or(if now.dur > 0.0 { (now.pos / now.dur) as f32 } else { 0.0 });
-        let mut bar_el = El::rect(bar, ppp, 24.0, 1.0, 12.0, Kind::Glass, 0.0, 0.0);
+        let mut bar_el = El::rect(bar, ppp, 24.0, 1.0, 12.0, Kind::Glass, 0.0, 0.0).with_class(crate::glass::Class::Player);
         if can_seek {
             bar_el = bar_el.with_fill(progress);
         }

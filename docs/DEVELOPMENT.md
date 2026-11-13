@@ -89,16 +89,54 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   rise and pop at random heights) and Custom (Settings → Appearance). Custom
   has a background, accent and text colour (each with a picker) and an
   optional PNG/JPG background picture, saved in `custom-theme.json` (the
-  picture is copied into the `theme` folder).
+  picture is copied into the `backgrounds` folder).
+- **Theme CSS** (Custom theme → Edit CSS, `theme.css`): a real but small
+  CSS. Selectors `:root` / `body`, `.panel`, `.sidebar`, `.player`;
+  properties for colours (`background`, `color`, `accent-color`,
+  `border-color`), a picture (`background-image: url(…)`), `border-radius`,
+  `backdrop-filter: blur(…)` and `font-family` (any installed font, found
+  through Windows' font list). Custom properties and `var()` work. What it
+  can't use is shown with its line number next to the button. The file is
+  read again whenever it's saved (looked at once a second while the Custom
+  theme is on), and its values go on top of the picked colours.
+- **Liquid glass** (Settings → Appearance, off by default, `look.json`): off
+  is the simple look: flat, slightly see-through panels with a hairline and
+  a small shadow, calmer corners and ordinary app greys. Panels still blur
+  what's behind them. On is the bending, reflecting glass.
 - **Playlist search:** a search field in every playlist's header filters by
   song, artist or album (every word must match), in the list and on the CD
   shelf. Ctrl+F focuses it, Esc clears it. Playing a found song plays the
   whole playlist from there.
 - **Speed and bass:** the sliders button left of loop opens a dropdown above
   the bar with two line sliders: speed 0.5–2× (pitch follows, like a
-  record; YouTube rounds to its own steps) and bass −10…+12 dB (a low shelf
-  at 110 Hz with headroom and a soft limit; not for YouTube songs). Values
-  glide, dragging ticks softly, double-click resets. Saved in `sound.json`.
+  record; YouTube rounds to its own steps) and bass −12…+24 dB (the Bass
+  effect; not for YouTube songs). Values glide, dragging ticks softly,
+  double-click resets. A link leads on to the equalizer. Saved in
+  `sound.json`.
+- **Gapless and crossfade** (Settings → Playback): the song that follows is
+  loaded ahead and handed to the mixer, which starts it on the sample after
+  the current one's last (crossfade 0) or fades the two into each other
+  with equal power (up to 12 s). YouTube songs can't take part.
+- **Equalizer** (Settings → Equalizer): preamp and ten bands (31 Hz–16 kHz,
+  ±12 dB) with the curve drawn above; the picked band can be fine-tuned in
+  0.1 dB steps and its width (Q 0.3–8) set.
+- **Effects** (Settings → Effects), each with a switch (all off at first)
+  and its own sliders: bass, clarity, stereo widening, crossfeed, headphone
+  surround, reverb, compressor, output volume / balance, limiter. With
+  everything off the sound passes through bit for bit.
+- **Server streams** (Settings → Playback): songs from Navidrome / Jellyfin
+  come as stored, or converted by the server to MP3, AAC or FLAC at a chosen
+  bitrate. A server without that converter answers with its default (often
+  Opus), which Starlite can't decode and says so.
+- **Jellyfin** (in the sidebar): sign in with address, username and
+  password; only the access token Jellyfin returns is saved
+  (`jellyfin.json`). Playlists, right-click to add one to your playlists,
+  shelf previews, gapless: everything Navidrome playlists do.
+- **Last.fm** (Settings → Last.fm): scrobbling with your own API key and
+  shared secret; you allow Starlite in the browser (token flow), so the
+  Last.fm password never reaches the app. "Now playing" when a song starts,
+  a scrobble after half the song or four minutes; ones that couldn't be
+  sent wait in `lastfm-queue.json`.
 - **CD shelf** (Settings → Appearance, off by default, `shelf.json`): playlist
   songs stand as CD cases on a shelf, spine out (spine colour from the cover).
   Hovering one pulls it out: a small 3D jewel-case model (projected egui
@@ -133,12 +171,23 @@ Connect in Settings → YouTube, either way:
 Your country's charts are picked from the Windows region (override with
 `STARLITE_REGION=US`).
 
-## How the glass works
+## How the sound gets out
 
-One GLSL shader (`src/glass.rs`) draws the theme background and up to 24 glass
-elements: nav bar, pills, bubbles, player bar, buttons, and the volume lens. A
-second pass draws dialogs and popovers as glass over the finished UI. Nothing
-is captured from your desktop, and idle Light/Dark windows draw nothing.
+`src/audio.rs` owns the device and one endless source, the mixer
+(`src/engine.rs`). Songs become "decks" (decoded and resampled to the
+device's rate, stereo); the mixer plays the current deck, brings the next
+one in (gapless or crossfade), and runs every frame through `src/dsp.rs`
+(equalizer, then the effects in a fixed order; filters in double
+precision). Commands reach it over a channel, state comes back through
+atomics. Shelf previews have their own output and skip all of this.
+
+## How the panels are drawn
+
+One GLSL shader (`src/glass.rs`) draws the theme background and up to 24
+elements: nav bar, pills, bubbles, player bar, buttons, and the volume knob,
+either as flat panels (the default) or as liquid glass. A second pass draws
+dialogs and popovers over the finished UI. Nothing is captured from your
+desktop, and idle Light/Dark windows draw nothing.
 
 Icons are rasterized at their exact on-screen pixel size (`src/icons.rs`), so
 they stay sharp at any size and mid-animation.
@@ -153,7 +202,14 @@ they stay sharp at any size and mid-animation.
 | `src/nowplaying.rs` | full screen Now Playing, lyrics, cover palette |
 | `src/mini.rs` | mini player card shown while you're in another app |
 | `src/shelf.rs` | CD shelf view and the 3D case |
-| `src/fx.rs` | speed and bass (low-shelf filter), `sound.json` |
+| `src/fx.rs` | sound settings: speed, crossfade, equalizer, effects (`sound.json`) |
+| `src/dsp.rs` | the equalizer and the effects |
+| `src/engine.rs` | the mixer: gapless, crossfade, then `dsp` |
+| `src/soundpage.rs` | Settings tabs Playback, Equalizer, Effects |
+| `src/stream.rs` | how server songs are asked for (as stored / converted) |
+| `src/jellyfin.rs` | Jellyfin API client |
+| `src/lastfm.rs` | Last.fm scrobbling and its Settings tab |
+| `src/css.rs` | the Custom theme's CSS: parser and font lookup |
 | `src/fxpanel.rs` | the speed / bass dropdown above the player bar |
 | `src/customize.rs` | custom theme settings and the colour picker |
 | `src/m3u.rs` | loading a playlist from an .m3u / .m3u8 file |
@@ -162,7 +218,7 @@ they stay sharp at any size and mid-animation.
 | `src/navidrome.rs` | Navidrome / Subsonic API client |
 | `src/meta.rs` | tags, cover art and lyrics from audio files |
 | `src/lyrics.rs` | lyrics lookup on lrclib.net, cache |
-| `src/audio.rs` | playback engine (rodio) |
+| `src/audio.rs` | playback: device, loading songs, lining up the next one |
 | `src/youtube.rs` | YouTube Data API client (Google sign-in / API key) |
 | `src/ytplayer.rs` | YouTube's embedded player in a WebView2 card |
 | `src/library.rs` | playlists, Liked, Downloaded, `library.json` |
@@ -203,7 +259,14 @@ also MIT via Feather. They're free for public and commercial use, as long as
 | `STARLITE_COLOR_PICK=0..2` | open the custom theme's colour picker (Settings) |
 | `STARLITE_M3U=<file>` | with `STARLITE_DIALOG`, load that .m3u into the dialog |
 | `STARLITE_SHOTS=dir,count,ms,delay` | save `count` window frames to `dir`, then quit |
+| `STARLITE_MUTE=1` | start muted |
+| `STARLITE_GLASS=1\|0` | force liquid glass on / off (doesn't change the saved setting) |
+| `STARLITE_EQ_SEL=0..10` | the equalizer slider picked at start |
+| `STARLITE_PAGE=jellyfin`, `STARLITE_JF_CONNECT=url\|user\|password` | like the Navidrome ones |
+| `STARLITE_LASTFM_API=<url>` | talk to a test server instead of Last.fm |
+| `STARLITE_LASTFM_CONNECT=key\|secret` | start connecting to Last.fm at once |
+| `STARLITE_LASTFM_FAST=1` | scrobble after five seconds |
 
 ## Planned
 
-Navidrome (Subsonic) streaming and downloads, search.
+Downloads from Navidrome / Jellyfin, albums and artists from the servers.
