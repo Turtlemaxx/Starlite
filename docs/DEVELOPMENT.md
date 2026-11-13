@@ -99,6 +99,13 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   can't use is shown with its line number next to the button. The file is
   read again whenever it's saved (looked at once a second while the Custom
   theme is on), and its values go on top of the picked colours.
+- **Services** (Settings → Services, `src/services.rs`): one menu for
+  Navidrome, Jellyfin, YouTube, Discord and Last.fm, each with its
+  settings beside it. Servers are signed in to here; the sidebar only
+  shows the ones that are connected, and a server's page sends you back
+  here when it isn't. On the very first start (nothing saved yet, marker
+  file `welcomed`) a welcome window offers to connect Navidrome, Jellyfin
+  or both at once.
 - **Update notice** (`src/updater.rs`, `updates.json`): on start and every
   six hours Starlite asks GitHub for its latest release. A newer one opens
   a window with Install: the zip is downloaded (only from this repo's
@@ -218,6 +225,7 @@ they stay sharp at any size and mid-animation.
 | `src/jellyfin.rs` | Jellyfin API client |
 | `src/lastfm.rs` | Last.fm scrobbling and its Settings tab |
 | `src/updater.rs` | update notice and install |
+| `src/services.rs` | Settings → Services and the first-start welcome window |
 | `src/css.rs` | the Custom theme's CSS: parser and font lookup |
 | `src/fxpanel.rs` | the speed / bass dropdown above the player bar |
 | `src/customize.rs` | custom theme settings and the colour picker |
@@ -269,6 +277,8 @@ also MIT via Feather. They're free for public and commercial use, as long as
 | `STARLITE_M3U=<file>` | with `STARLITE_DIALOG`, load that .m3u into the dialog |
 | `STARLITE_SHOTS=dir,count,ms,delay` | save `count` window frames to `dir`, then quit |
 | `STARLITE_MUTE=1` | start muted |
+| `STARLITE_WELCOME=1` | show the first-start welcome window |
+| `STARLITE_SERVICE=0..4` | the service picked in Settings → Services |
 | `STARLITE_UPDATE_API=http://127.0.0.1:port/latest` | ask a test server on this PC for the latest release |
 | `STARLITE_UPDATE_INSTALL=1` | press Install in the update window once |
 | `STARLITE_GLASS=1\|0` | force liquid glass on / off (doesn't change the saved setting) |

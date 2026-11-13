@@ -213,6 +213,10 @@ pub struct Starlite {
     /// The song lined up to follow the current one: (audio serial it follows, its place in the queue, its id).
     pub lined_up: Option<(u64, usize, String)>,
     pub sound_ui: crate::soundpage::SoundUi,
+    /// The service picked in Settings → Services.
+    pub service_sel: usize,
+    /// The welcome window of the first start.
+    pub welcome: Option<crate::services::Welcome>,
     /// Looks for new versions and installs them.
     pub updater: crate::updater::Updater,
     pub lastfm: crate::lastfm::LastFm,
@@ -444,7 +448,7 @@ impl Starlite {
             jf: Arc::new(crate::jellyfin::Jellyfin::load()),
             jfst: NdState::default(),
             stream: crate::stream::StreamPrefs::load(),
-            // Debug: STARLITE_SETTINGS_TAB=0..8 opens that Settings tab.
+            // Debug: STARLITE_SETTINGS_TAB=0..6 opens that Settings tab.
             settings_tab: std::env::var("STARLITE_SETTINGS_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             discord: crate::discord::Discord::start(),
             dc_id_input: crate::discord::DiscordPrefs::load().app_id,
@@ -485,6 +489,9 @@ impl Starlite {
             play_serial: 0,
             lined_up: None,
             sound_ui: Default::default(),
+            // Debug: STARLITE_SERVICE=0..4 picks that service in Settings.
+            service_sel: std::env::var("STARLITE_SERVICE").ok().and_then(|v| v.parse().ok()).filter(|&i| i < 5).unwrap_or(0),
+            welcome: None,
             updater: crate::updater::Updater::start(&cc.egui_ctx),
             lastfm: crate::lastfm::LastFm::start(),
             lfm_ui: Default::default(),
@@ -534,6 +541,7 @@ impl Starlite {
         }
         app.audio.set_speed(app.fx.speed);
         app.audio.set_fx(&app.fx);
+        app.welcome = crate::services::first_start(!app.connected_servers().is_empty());
         // Just started by the updater.
         if std::env::var("STARLITE_UPDATED").is_ok() {
             app.toast(concat!("Updated to Starlite ", env!("CARGO_PKG_VERSION")));
@@ -991,7 +999,7 @@ impl Starlite {
 
     /// A dropdown or dialog is open: the page under it must not react.
     pub fn overlay_open(&self) -> bool {
-        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some() || self.updater.open
+        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some() || self.updater.open || self.welcome.is_some()
     }
 
     pub fn now_is_youtube(&self) -> bool {
@@ -1117,11 +1125,13 @@ impl Starlite {
 
         let logo = lerp_rect(Rect::from_center_size(pos2(w * 0.5, 46.0), Vec2::splat(56.0)), Rect::from_min_size(pos2(18.0, 14.0), Vec2::splat(74.0)), t);
         let mut rows = vec![(NavKey::Explore, row(98.0, 92.0))];
-        let nd_y = lerp(144.0, 140.0, t);
-        rows.push((NavKey::Server(Server::Navidrome), row(nd_y, nd_y)));
-        let jf_y = lerp(196.0, 182.0, t);
-        rows.push((NavKey::Server(Server::Jellyfin), row(jf_y, jf_y)));
-        let shift = lerp(104.0, 88.0, t);
+        // Only the servers that are connected (set up in Settings → Services).
+        let servers = self.connected_servers();
+        for (k, s) in servers.iter().enumerate() {
+            let y = lerp(144.0 + 52.0 * k as f32, 140.0 + 42.0 * k as f32, t);
+            rows.push((NavKey::Server(*s), row(y, y)));
+        }
+        let shift = servers.len() as f32 * lerp(52.0, 44.0, t);
         let header = Rect::from_min_size(pos2(24.0, lerp(146.0, 150.0, t) + shift), vec2((w - 48.0).max(1.0), 22.0));
         let plus = pos2(lerp(w * 0.5, w - 30.0, t), lerp(158.0, 161.0, t) + shift);
 
@@ -2051,7 +2061,9 @@ impl eframe::App for Starlite {
             if self.color_pick.is_some() {
                 self.draw_color_pick(ui, ppp, dt, full, time, nav_w, &mut animating);
             }
-            if self.updater.open {
+            if self.welcome.is_some() {
+                self.draw_welcome(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
+            } else if self.updater.open {
                 self.draw_update(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
             }
         });

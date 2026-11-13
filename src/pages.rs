@@ -54,58 +54,13 @@ impl Starlite {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
-        let title_r = p.text(pos2(content.left(), 30.0), Align2::LEFT_TOP, s.name(), font(30.0, "bold"), theme.text());
-
         let Some((url, user)) = self.server_connected(s) else {
-            // Connect form.
-            let b = Rect::from_min_size(pos2(content.left(), 96.0), vec2(content.width().min(560.0), 352.0));
-            els.push(El::rect(b, ppp, 26.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0));
-            icons.paint(ui, s.icon(), pos2(b.left() + 40.0, b.top() + 42.0), 24.0, theme.accent());
-            p.text(pos2(b.left() + 64.0, b.top() + 42.0), Align2::LEFT_CENTER, format!("Connect your {} server", s.name()), font(18.0, "bold"), theme.text());
-            p.text(pos2(b.left() + 26.0, b.top() + 76.0), Align2::LEFT_CENTER, "Sign in to play your server's playlists here.", font(13.5, "regular"), theme.text_dim());
-            let fw = b.width() - 52.0;
-            let mut y = b.top() + 100.0;
-            let mut submit = false;
-            let address = match s {
-                Server::Navidrome => "Server address, e.g. http://192.168.1.10:4533",
-                Server::Jellyfin => "Server address, e.g. http://192.168.1.10:8096",
-            };
-            for (i, (hint, password)) in [(address, false), ("Username", false), ("Password", true)].into_iter().enumerate() {
-                let r = Rect::from_min_size(pos2(b.left() + 26.0, y), vec2(fw, 40.0));
-                let mut v = match i {
-                    0 => std::mem::take(&mut self.st(s).url),
-                    1 => std::mem::take(&mut self.st(s).user),
-                    _ => std::mem::take(&mut self.st(s).pass),
-                };
-                let resp = field(ui, els, ppp, r, &mut v, hint, password, true, theme);
-                if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                    submit = true;
-                }
-                match i {
-                    0 => self.st(s).url = v,
-                    1 => self.st(s).user = v,
-                    _ => self.st(s).pass = v,
-                }
-                y += 50.0;
-            }
-            let busy = self.st(s).busy;
-            let r = Rect::from_min_size(pos2(b.left() + 26.0, y + 6.0), vec2(150.0, 38.0));
-            if pill(ui, icons, els, ppp, Id::new("nd_connect"), r, if busy { "Connecting…" } else { "Connect" }, Some(s.icon()), true, true, theme).clicked() {
-                submit = true;
-            }
-            if busy {
-                *animating = true;
-            }
-            if submit && !busy {
-                self.sound.click();
-                self.connect_server(&ctx, s);
-            }
-            if let Some(e) = self.st(s).error.clone() {
-                text_trunc(&p, pos2(r.right() + 16.0, r.center().y), Align2::LEFT_CENTER, &e, font(13.0, "semibold"), Color32::from_rgb(235, 87, 87), b.right() - r.right() - 32.0);
-            }
+            // Not connected (any more): its sign-in is in Settings → Services.
+            self.open_service(s as usize);
             return;
         };
 
+        let title_r = p.text(pos2(content.left(), 30.0), Align2::LEFT_TOP, s.name(), font(30.0, "bold"), theme.text());
         // Connected: refresh, who / where, disconnect.
         let loading = self.st(s).loading;
         let rc = pos2(title_r.right() + 30.0, title_r.center().y + 1.0);
@@ -218,12 +173,12 @@ impl Starlite {
                 if self.yt.can_sign_in() {
                     self.sign_in_youtube(&ctx);
                 }
-                self.view = View::Settings;
+                self.open_service(2);
             }
             let r2 = Rect::from_min_size(pos2(r.right() + 12.0, r.top()), vec2(150.0, 38.0));
             if pill(ui, icons, els, ppp, Id::new("open_settings"), r2, "Use an API key", Some("settings"), false, true, theme).clicked() {
                 self.sound.click();
-                self.view = View::Settings;
+                self.open_service(2);
             }
             return;
         }
@@ -589,7 +544,7 @@ impl Starlite {
         p.text(pos2(x0, 30.0), Align2::LEFT_TOP, "Settings", font(30.0, "bold"), theme.text());
 
         // Tabs: one glass strip with a glass highlight that slides between them.
-        const TABS: [&str; 9] = ["Appearance", "Playback", "Equalizer", "Effects", "Mini player", "Lyrics", "YouTube", "Discord", "Last.fm"];
+        const TABS: [&str; 7] = ["Appearance", "Playback", "Equalizer", "Effects", "Mini player", "Lyrics", "Services"];
         let f = font(13.5, "semibold");
         let text_w: Vec<f32> = TABS.iter().map(|t| p.layout_no_wrap(t.to_string(), f.clone(), theme.text()).size().x).collect();
         // Less air between the names when the window is narrow.
@@ -686,10 +641,8 @@ impl Starlite {
             1 => self.playback_settings(ui, els, ppp, x0, top, content.width().min(560.0)),
             2 => self.equalizer_settings(ui, icons, els, ppp, x0, top, content),
             3 => self.effects_settings(ui, x0, top - 8.0, content),
-            6 => {
-                self.youtube_settings(ui, icons, els, ppp, x0, top, content.width().min(520.0));
-            }
-            8 => self.lastfm_settings(ui, icons, els, ppp, x0, top, content.width().min(560.0)),
+            // Navidrome, Jellyfin, YouTube, Discord and Last.fm.
+            crate::services::TAB => self.services_settings(ui, icons, els, ppp, x0, top, content),
             4 => {
                 // Mini player: on / off and the customize mode.
                 let w = content.width().min(520.0);
@@ -731,13 +684,13 @@ impl Starlite {
                     self.load_lyrics(&ctx);
                 }
             }
-            _ => self.discord_settings(ui, icons, els, ppp, x0, top, content),
+            _ => {}
         }
     }
 
     /// Discord Rich Presence: on / off, the Application ID, what to show.
     #[allow(clippy::too_many_arguments)]
-    fn discord_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, top: f32, content: Rect) {
+    pub fn discord_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, top: f32, content: Rect) {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
@@ -817,7 +770,7 @@ impl Starlite {
 
     /// Returns the bottom y of the section.
     #[allow(clippy::too_many_arguments)]
-    fn youtube_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, y: f32, w: f32) -> f32 {
+    pub fn youtube_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, y: f32, w: f32) -> f32 {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();

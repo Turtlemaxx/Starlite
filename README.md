@@ -50,7 +50,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 ## Install
 
-1. Download `Starlite-0.3.0-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
+1. Download `Starlite-0.3.1-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
 2. Unzip it anywhere and run `Starlite.exe`.
 
 Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, which Windows 11 already has.
@@ -58,10 +58,10 @@ Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, wh
 ## Setup
 
 - **Your music:** put MP3, FLAC, WAV, OGG or M4A files in the `Downloaded songs` folder next to the app.
-- **YouTube:** Settings → YouTube → paste a free [YouTube Data API key](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
-- **Navidrome / Jellyfin:** pick it in the sidebar → server address, username, password.
-- **Last.fm:** create an API account at [last.fm/api/account/create](https://www.last.fm/api/account/create), paste its API key and shared secret in Settings → Last.fm, press Connect and allow Starlite in your browser.
-- **Discord:** create an application named "Starlite" in the [Discord Developer Portal](https://discord.com/developers/applications), paste its Application ID in Settings → Discord, and upload the Starlite icon (the **Save icon…** button) under Rich Presence → Art Assets as `starlite`.
+- **YouTube:** Settings → Services → YouTube → paste a free [YouTube Data API key](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
+- **Navidrome / Jellyfin:** the first start asks for them; later it's Settings → Services → server address, username, password. Connected servers appear in the sidebar.
+- **Last.fm:** create an API account at [last.fm/api/account/create](https://www.last.fm/api/account/create), paste its API key and shared secret in Settings → Services → Last.fm, press Connect and allow Starlite in your browser.
+- **Discord:** create an application named "Starlite" in the [Discord Developer Portal](https://discord.com/developers/applications), paste its Application ID in Settings → Services → Discord, and upload the Starlite icon (the **Save icon…** button) under Rich Presence → Art Assets as `starlite`.
 
 Settings, playlists and logins are stored in `%APPDATA%\Starlite`.
 

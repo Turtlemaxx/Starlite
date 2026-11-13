@@ -25,6 +25,7 @@ mod nowplaying;
 mod pages;
 mod preview;
 mod player;
+mod services;
 mod shelf;
 mod sound;
 mod soundpage;
