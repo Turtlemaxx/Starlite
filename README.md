@@ -46,11 +46,13 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 **And also:** your own playlists (start one from an .m3u file if you like), Liked Music, local files with their real tags and covers, optional YouTube Music charts (played in YouTube's official player), shuffle and loop.
 
+**Your sidebar.** The pencil under Settings lets you rearrange the sidebar: drag entries (Downloaded Music, your playlists, the servers…) where you want them, make your own categories, and pin things to the bottom.
+
 **Updates.** Starlite tells you when a new version is out and installs it with one click (can be switched off in Settings → Appearance).
 
 ## Install
 
-1. Download `Starlite-0.3.2-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
+1. Download `Starlite-0.3.3-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
 2. Unzip it anywhere and run `Starlite.exe`.
 
 Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, which Windows 11 already has.

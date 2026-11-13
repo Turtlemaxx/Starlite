@@ -115,6 +115,8 @@ pub struct Dialog {
     pub add_after: Option<Track>,
     /// Songs loaded from an .m3u file (and how many weren't found).
     pub import: Option<(Vec<Track>, usize)>,
+    /// The sidebar category it was started from (its place in the layout).
+    pub under: Option<usize>,
 }
 
 /// The right-click menu on a Navidrome playlist.
@@ -196,6 +198,9 @@ pub struct Starlite {
     nav_t: f32,
     ptr_glow: f32,
     nav_scroll: f32,
+    /// The sidebar's layout: order, categories, what's pinned at the bottom.
+    pub nav: crate::nav::NavPrefs,
+    nav_edit: Option<NavEdit>,
     pub explore: ExploreState,
     pub remote: Option<RemoteView>,
     pub queue: Vec<Track>,
@@ -396,13 +401,31 @@ pub fn lerp(a: f32, b: f32, t: f32) -> f32 {
 }
 
 struct NavLayout {
-    rows: Vec<(NavKey, Rect)>,
+    /// (place in the layout list, what it opens, where it is)
+    rows: Vec<(usize, NavKey, Rect)>,
+    /// Category titles: (place in the layout list, where).
+    headers: Vec<(usize, Rect)>,
+    settings: Rect,
     logo: Rect,
-    header: Rect,
-    plus: Pos2,
+    /// The scrolling part.
     list_clip: Rect,
     divider_y: f32,
     collapse: Pos2,
+    edit: Pos2,
+    content_h: f32,
+    /// Between the scrolling and the pinned part.
+    marker_y: f32,
+    /// "Add category" (while editing).
+    add_cat: Option<Rect>,
+}
+
+/// The sidebar is being edited.
+#[derive(Default)]
+struct NavEdit {
+    /// The entry being dragged (its place in the layout list).
+    drag: Option<usize>,
+    /// The category being renamed, and the text so far.
+    rename: Option<(usize, String)>,
 }
 
 impl Starlite {
@@ -475,6 +498,9 @@ impl Starlite {
             nav_t: if nav_open { 1.0 } else { 0.0 },
             ptr_glow: 0.0,
             nav_scroll: 0.0,
+            nav: crate::nav::NavPrefs::load(),
+            // Debug: STARLITE_NAV_EDIT=1 starts with the sidebar in edit mode.
+            nav_edit: std::env::var("STARLITE_NAV_EDIT").is_ok().then(NavEdit::default),
             explore: ExploreState::default(),
             remote: None,
             queue: Vec::new(),
@@ -1113,49 +1139,76 @@ impl Starlite {
 
     pub fn open_dialog(&mut self, add_after: Option<Track>) {
         self.popover = None;
-        self.dialog = Some(Dialog { name: String::new(), cover: Cover::Preset("disc-3".into()), error: None, open_t: 0.0, add_after, import: None });
+        self.dialog = Some(Dialog { name: String::new(), cover: Cover::Preset("disc-3".into()), error: None, open_t: 0.0, add_after, import: None, under: None });
     }
 
     // ── Navigation ─────────────────────────────────────────────────
 
     fn nav_layout(&self, w: f32, h: f32, t: f32) -> NavLayout {
+        use crate::nav::NavItem;
         let full = |y: f32| Rect::from_min_size(pos2(12.0, y), vec2(w - 24.0, 38.0));
         let mini = |y: f32| Rect::from_min_size(pos2(w * 0.5 - 23.0, y), Vec2::splat(46.0));
-        let row = |ye: f32, ym: f32| lerp_rect(mini(ym), full(ye), t);
-
+        let row = |y: f32| lerp_rect(mini(y), full(y), t);
         let logo = lerp_rect(Rect::from_center_size(pos2(w * 0.5, 46.0), Vec2::splat(56.0)), Rect::from_min_size(pos2(18.0, 14.0), Vec2::splat(74.0)), t);
-        let mut rows = vec![(NavKey::Explore, row(98.0, 92.0))];
-        // Only the servers that are connected (set up in Settings → Services).
-        let servers = self.connected_servers();
-        for (k, s) in servers.iter().enumerate() {
-            let y = lerp(144.0 + 52.0 * k as f32, 140.0 + 42.0 * k as f32, t);
-            rows.push((NavKey::Server(*s), row(y, y)));
-        }
-        let shift = servers.len() as f32 * lerp(52.0, 44.0, t);
-        let header = Rect::from_min_size(pos2(24.0, lerp(146.0, 150.0, t) + shift), vec2((w - 48.0).max(1.0), 22.0));
-        let plus = pos2(lerp(w * 0.5, w - 30.0, t), lerp(158.0, 161.0, t) + shift);
+        let (pitch, row_h, header_h) = (lerp(52.0, 42.0, t), lerp(46.0, 38.0, t), lerp(40.0, 38.0, t));
+        let editing = self.nav_edit.is_some();
+        let items = &self.nav.items;
+        let bottom = self.nav.bottom();
+        // Servers only show while they're connected.
+        let shown = |it: &NavItem| match it {
+            NavItem::Server(s) => self.server_connected(*s).is_some(),
+            NavItem::Bottom => false,
+            _ => true,
+        };
+        let key = |it: &NavItem| match it {
+            NavItem::Explore => Some(NavKey::Explore),
+            NavItem::Server(s) => Some(NavKey::Server(*s)),
+            NavItem::Liked => Some(NavKey::Liked),
+            NavItem::Downloaded => Some(NavKey::Downloaded),
+            NavItem::Playlist(id) => Some(NavKey::Playlist(id.clone())),
+            NavItem::Link(s, id) => Some(NavKey::NdLink(*s, id.clone())),
+            NavItem::Header(_) | NavItem::Bottom => None,
+        };
+        let height = |it: &NavItem| if matches!(it, NavItem::Header(_)) { header_h } else { pitch };
 
         let collapse = pos2(lerp(w * 0.5, 36.0, t), h - 30.0);
-        let settings_y = h - 52.0 - lerp(46.0, 38.0, t);
-        let settings = row(settings_y, settings_y);
+        let edit = pos2(w - 36.0, h - 30.0);
+        let settings_y = h - 52.0 - row_h;
+        let settings = row(settings_y);
         let divider_y = settings.top() - 9.0;
-        let dl_y = divider_y - 9.0 - lerp(46.0, 38.0, t);
-        let dl = row(dl_y, dl_y);
-        let liked_y = dl.top() - lerp(52.0, 42.0, t);
-        let liked = row(liked_y, liked_y);
 
-        let list_top = lerp(184.0, 178.0, t) + shift;
-        let list_clip = Rect::from_min_max(pos2(0.0, list_top - 2.0), pos2(w, (liked.top() - 10.0).max(list_top)));
-        let pitch = lerp(52.0, 42.0, t);
-        let keys = self.lib.user_playlists().map(|p| NavKey::Playlist(p.id.clone())).chain(self.lib.nd_links.iter().map(|l| NavKey::NdLink(l.server, l.id.clone())));
-        for (i, k) in keys.enumerate() {
-            let y = list_top + i as f32 * pitch - self.nav_scroll;
-            rows.push((k, row(y, y)));
+        let mut rows = Vec::new();
+        let mut headers = Vec::new();
+        let place = |i: usize, it: &NavItem, y: f32, rows: &mut Vec<(usize, NavKey, Rect)>, headers: &mut Vec<(usize, Rect)>| match key(it) {
+            Some(k) => rows.push((i, k, row(y))),
+            None => headers.push((i, Rect::from_min_size(pos2(24.0, y + lerp(2.0, 10.0, t)), vec2((w - 48.0).max(1.0), 22.0)))),
+        };
+        // The pinned part stacks up from the divider.
+        let pinned: f32 = items.iter().skip(bottom + 1).filter(|it| shown(it)).map(height).sum();
+        let pinned_top = divider_y - 9.0 - pinned + (pitch - row_h);
+        let mut y = pinned_top;
+        for (i, it) in items.iter().enumerate().skip(bottom + 1).filter(|(_, it)| shown(it)) {
+            place(i, it, y, &mut rows, &mut headers);
+            y += height(it);
         }
-        rows.push((NavKey::Liked, liked));
-        rows.push((NavKey::Downloaded, dl));
-        rows.push((NavKey::Settings, settings));
-        NavLayout { rows, logo, header, plus, list_clip, divider_y, collapse }
+        // The rest scrolls between the logo and the pinned part.
+        let list_top = lerp(92.0, 98.0, t);
+        let list_bottom = (if pinned > 0.0 { pinned_top } else { divider_y } - 10.0).max(list_top);
+        let list_clip = Rect::from_min_max(pos2(0.0, list_top - 4.0), pos2(w, list_bottom));
+        let mut y = list_top - self.nav_scroll;
+        for (i, it) in items.iter().enumerate().take(bottom).filter(|(_, it)| shown(it)) {
+            place(i, it, y, &mut rows, &mut headers);
+            y += height(it);
+        }
+        // Editing: "Add category" closes the list.
+        let add_cat = editing.then(|| Rect::from_min_size(pos2(12.0, y + 4.0), vec2(w - 24.0, 34.0)));
+        if editing {
+            y += 44.0;
+        }
+        let content_h = y + self.nav_scroll - list_top;
+        // Between the two parts: dragging past here crosses over.
+        let marker_y = ((y.min(list_bottom)) + pinned_top) * 0.5;
+        NavLayout { rows, headers, settings, logo, list_clip, divider_y, collapse, edit, content_h, marker_y, add_cat }
     }
 
     fn key_for_view(&self) -> Option<NavKey> {
@@ -1176,17 +1229,27 @@ impl Starlite {
 
     #[allow(clippy::too_many_arguments)]
     fn draw_nav(&mut self, ui: &mut egui::Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, dt: f32, full: Rect, nav_w: f32, animating: &mut bool) {
+        use crate::nav::NavItem;
         let ctx = ui.ctx().clone();
         let theme = self.theme;
+        // New and deleted playlists find their way into the layout.
+        if self.nav.sync(&self.lib) {
+            self.nav.save();
+        }
+        let editing = self.nav_edit.is_some();
+        if editing {
+            // Editing needs the full sidebar.
+            self.nav_open = true;
+        }
         let t = smooth(self.nav_t);
         let lay = self.nav_layout(nav_w, full.height(), t);
         let label_a = ((self.nav_t - 0.55) / 0.45).clamp(0.0, 1.0);
         let p = ui.painter().clone();
+        let bottom = self.nav.bottom();
+        let dragging = self.nav_edit.as_ref().and_then(|e| e.drag);
 
-        // Scroll the playlist list if it overflows.
-        let n = (self.lib.user_playlists().count() + self.lib.nd_links.len()) as f32;
-        let content_h = n * lerp(52.0, 42.0, t);
-        let max_scroll = (content_h - lay.list_clip.height() + 6.0).max(0.0);
+        // Scroll the list if it overflows.
+        let max_scroll = (lay.content_h - lay.list_clip.height() + 10.0).max(0.0);
         if ui.rect_contains_pointer(lay.list_clip) {
             let d = ctx.input(|i| i.smooth_scroll_delta.y);
             self.nav_scroll = (self.nav_scroll - d).clamp(0.0, max_scroll);
@@ -1196,19 +1259,84 @@ impl Starlite {
         // Logo (top-left): the light-theme version on Light, else the dark one.
         self.logo.paint(ui, lay.logo, theme.is_light(), 1.0);
 
-        // "Playlists" section header with the + (new playlist) button.
-        if label_a > 0.0 {
-            p.text(lay.header.left_center(), Align2::LEFT_CENTER, "PLAYLISTS", font(11.0, "semibold"), theme.text_dim().gamma_multiply(label_a));
-        }
-        if icon_button(ui, icons, els, ppp, ui.id().with("nav_plus"), lay.plus, 28.0, "plus", false, true, theme)
-            .on_hover_text("New playlist")
-            .clicked()
-        {
-            self.sound.click();
-            self.open_dialog(None);
+        // While editing, entries glide to their new places.
+        let settle = |id: egui::Id, r: Rect, scrolls: bool, scroll: f32| -> Rect {
+            if !editing {
+                return r;
+            }
+            let base = r.top() + if scrolls { scroll } else { 0.0 };
+            let y = ctx.animate_value_with_time(id, base, 0.14) - if scrolls { scroll } else { 0.0 };
+            r.translate(vec2(0.0, y - r.top()))
+        };
+
+        // Categories: the name, and + for a new playlist under it.
+        let mut new_under: Option<usize> = None;
+        let mut start_rename: Option<usize> = None;
+        let mut delete: Option<usize> = None;
+        let mut drag_start: Option<usize> = None;
+        let mut renamed: Option<(usize, String, bool)> = None;
+        let first_header = lay.headers.iter().map(|h| h.0).min();
+        for (idx, rect) in &lay.headers {
+            let in_list = *idx < bottom;
+            let rect = settle(ui.id().with(("nav_hy", *idx, self.nav.items.len())), *rect, in_list, self.nav_scroll);
+            if in_list && (rect.bottom() < lay.list_clip.top() || rect.top() > lay.list_clip.bottom()) {
+                continue;
+            }
+            let NavItem::Header(name) = self.nav.items[*idx].clone() else { continue };
+            let pp = if in_list { p.with_clip_rect(lay.list_clip) } else { p.clone() };
+            let cy = rect.center().y;
+            if !editing {
+                if label_a > 0.0 {
+                    text_trunc(&pp, rect.left_center(), Align2::LEFT_CENTER, &name.to_uppercase(), font(11.0, "semibold"), theme.text_dim().gamma_multiply(label_a), rect.width() - 36.0);
+                }
+                // Collapsed, only the first category keeps its + (the others are a short line).
+                if label_a > 0.5 || Some(*idx) == first_header {
+                    let plus = pos2(lerp(nav_w * 0.5, nav_w - 30.0, t), cy);
+                    if !in_list || lay.list_clip.contains(plus) {
+                        let r = icon_button(ui, icons, els, ppp, ui.id().with(("nav_plus", *idx)), plus, 28.0, "plus", false, true, theme).on_hover_text(format!("New playlist in {name}"));
+                        if r.clicked() {
+                            new_under = Some(*idx);
+                        }
+                    }
+                } else {
+                    pp.line_segment([pos2(nav_w * 0.5 - 12.0, cy), pos2(nav_w * 0.5 + 12.0, cy)], Stroke::new(1.0_f32, theme.hairline()));
+                }
+                continue;
+            }
+            // Editing: drag it (its entries come along), click the name to rename, x to remove.
+            let hit = Rect::from_min_max(pos2(12.0, rect.top() - 4.0), pos2(nav_w - 12.0, rect.bottom() + 4.0));
+            let hit = if in_list { hit.intersect(lay.list_clip) } else { hit };
+            let x_c = pos2(nav_w - 30.0, cy);
+            let renaming = self.nav_edit.as_ref().and_then(|e| e.rename.as_ref()).filter(|r| r.0 == *idx).map(|r| r.1.clone());
+            if let Some(mut text) = renaming {
+                let r = Rect::from_min_max(pos2(rect.left() - 4.0, rect.top() - 3.0), pos2(nav_w - 48.0, rect.bottom() + 3.0));
+                p.rect_filled(r, egui::CornerRadius::same(7), if theme.is_light() { Color32::from_black_alpha(16) } else { Color32::from_white_alpha(20) });
+                let resp = ui.put(
+                    r.shrink2(vec2(6.0, 0.0)),
+                    egui::TextEdit::singleline(&mut text).frame(false).font(font(12.5, "semibold")).text_color(theme.text()).vertical_align(egui::Align::Center).margin(egui::Margin::ZERO),
+                );
+                if !resp.has_focus() && !resp.lost_focus() {
+                    resp.request_focus();
+                }
+                renamed = Some((*idx, text, resp.lost_focus()));
+            } else {
+                let resp = ui.interact(Rect::from_min_max(hit.min, pos2(nav_w - 46.0, hit.bottom())), ui.id().with(("nav_hdr", *idx)), Sense::click_and_drag()).on_hover_cursor(CursorIcon::Grab);
+                text_trunc(&pp, rect.left_center(), Align2::LEFT_CENTER, &name.to_uppercase(), font(11.0, "semibold"), if resp.hovered() || dragging == Some(*idx) { theme.text() } else { theme.text_dim() }, rect.width() - 36.0);
+                if resp.drag_started() {
+                    drag_start = Some(*idx);
+                } else if resp.clicked() {
+                    start_rename = Some(*idx);
+                }
+                resp.on_hover_text("Drag to move it with its entries. Click to rename.");
+            }
+            let xr = ui.interact(Rect::from_center_size(x_c, Vec2::splat(26.0)), ui.id().with(("nav_hx", *idx)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            icons.paint(ui, "x", x_c, 14.0, if xr.hovered() { theme.text() } else { theme.text_dim() });
+            if xr.on_hover_text("Remove this category (its entries stay)").clicked() {
+                delete = Some(*idx);
+            }
         }
 
-        // Divider between Liked / Downloaded and Settings.
+        // Divider above Settings.
         let inset = lerp(18.0, 24.0, t);
         p.line_segment([pos2(inset, lay.divider_y), pos2(nav_w - inset, lay.divider_y)], Stroke::new(1.0_f32, theme.hairline().gamma_multiply(0.8)));
 
@@ -1217,16 +1345,30 @@ impl Starlite {
         let mut sel_press = 0.0;
         let mut clicked: Option<NavKey> = None;
         let mut right_clicked: Option<(Server, RemotePlaylist, Pos2)> = None;
-        for (key, rect) in &lay.rows {
-            let in_list = matches!(key, NavKey::Playlist(_) | NavKey::NdLink(..));
+        let mut sel_target: Option<(Rect, bool)> = None;
+        let all_rows = lay.rows.iter().map(|(i, k, r)| (Some(*i), k.clone(), *r)).chain(std::iter::once((None, NavKey::Settings, lay.settings)));
+        for (idx, key, rect) in all_rows {
+            let in_list = idx.is_some_and(|i| i < bottom);
+            let rect = match idx {
+                Some(i) => settle(ui.id().with(("nav_y", i, format!("{key:?}"))).with("y"), rect, in_list, self.nav_scroll),
+                None => rect,
+            };
+            let key = &key;
+            let rect = &rect;
             if in_list && (rect.bottom() < lay.list_clip.top() || rect.top() > lay.list_clip.bottom()) {
                 continue;
             }
             let id = ui.id().with(("nav", format!("{key:?}")));
             let hit = if in_list { rect.intersect(lay.list_clip) } else { *rect };
-            let resp = ui.interact(hit, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            // Editing: entries are dragged, not opened (Settings stays where it is).
+            let movable = editing && idx.is_some();
+            let resp = ui.interact(hit, id, if movable { Sense::drag() } else { Sense::click() }).on_hover_cursor(if movable { CursorIcon::Grab } else { CursorIcon::PointingHand });
             let is_sel = selected.as_ref() == Some(key);
-            let h = ctx.animate_bool_with_time(id.with("h"), resp.hovered() && !is_sel, 0.16);
+            if is_sel {
+                sel_target = Some((*rect, in_list));
+            }
+            let held = movable && dragging == idx;
+            let h = ctx.animate_bool_with_time(id.with("h"), (resp.hovered() || held) && !is_sel, 0.16);
             let pr = ctx.animate_bool_with_time(id.with("p"), resp.is_pointer_button_down_on(), 0.10);
             if is_sel {
                 sel_press = pr;
@@ -1235,13 +1377,18 @@ impl Starlite {
                 if in_list {
                     r = r.intersect(lay.list_clip);
                 }
-                hover_el = Some(El::rect(r, ppp, 12.0, h, 3.0, Kind::Layered, 0.4 * h, pr));
+                if held || hover_el.is_none() {
+                    hover_el = Some(El::rect(r, ppp, 12.0, h, 3.0, Kind::Layered, 0.4 * h, pr));
+                }
             }
-            if resp.clicked() && !is_sel {
+            if movable && resp.drag_started() {
+                drag_start = idx;
+            }
+            if !editing && resp.clicked() && !is_sel {
                 clicked = Some(key.clone());
             }
             if let NavKey::NdLink(srv, lid) = key {
-                if resp.secondary_clicked() {
+                if !editing && resp.secondary_clicked() {
                     if let (Some(l), Some(at)) = (self.lib.nd_link(*srv, lid), resp.interact_pointer_pos()) {
                         right_clicked = Some((*srv, l.to_remote(), at));
                     }
@@ -1257,12 +1404,14 @@ impl Starlite {
                 NavKey::Playlist(pid) => self.lib.playlists.iter().find(|p| &p.id == pid).map(|p| p.name.clone()).unwrap_or_default(),
                 NavKey::NdLink(srv, lid) => self.lib.nd_link(*srv, lid).map(|l| l.title.clone()).unwrap_or_default(),
             };
+            let row_hot = resp.hovered() || held;
             if label_a < 0.5 {
                 resp.on_hover_text(name.clone());
             }
             let tint = if is_sel { theme.accent() } else { theme.text_dim() };
-            let tc = if is_sel { theme.text() } else { theme.text_dim() };
+            let tc = if is_sel || held { theme.text() } else { theme.text_dim() };
             let lead_c = pos2(lerp(rect.center().x, rect.left() + 22.0, t), rect.center().y);
+            let clip = if in_list { lay.list_clip } else { full };
             let icon: Option<&'static str> = match key {
                 NavKey::Explore => Some("compass"),
                 NavKey::Server(s) => Some(s.icon()),
@@ -1272,8 +1421,8 @@ impl Starlite {
                 NavKey::Playlist(pid) => {
                     if let Some(pl) = self.lib.playlists.iter().find(|p| &p.id == pid) {
                         let c = Rect::from_center_size(lead_c, Vec2::splat(lerp(34.0, 26.0, t)));
-                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(lay.list_clip));
-                        cu.set_clip_rect(lay.list_clip);
+                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(clip));
+                        cu.set_clip_rect(clip);
                         let cover = pl.cover.clone();
                         playlist_cover(&cu, icons, c, &cover, 7.0, theme);
                     }
@@ -1282,8 +1431,8 @@ impl Starlite {
                 NavKey::NdLink(srv, lid) => {
                     if let Some(l) = self.lib.nd_link(*srv, lid) {
                         let c = Rect::from_center_size(lead_c, Vec2::splat(lerp(34.0, 26.0, t)));
-                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(lay.list_clip));
-                        cu.set_clip_rect(lay.list_clip);
+                        let mut cu = ui.new_child(egui::UiBuilder::new().max_rect(clip));
+                        cu.set_clip_rect(clip);
                         let art = l.artwork.clone();
                         crate::widgets::cover(&cu, icons, c, art.as_deref(), 7.0, srv.icon(), theme);
                     }
@@ -1291,11 +1440,19 @@ impl Starlite {
                 }
             };
             if let Some(ic) = icon {
-                icons.paint(ui, ic, lead_c, lerp(22.0, 18.0, t), tint);
+                if !in_list || lay.list_clip.contains(lead_c) {
+                    icons.paint(ui, ic, lead_c, lerp(22.0, 18.0, t), tint);
+                }
             }
             if label_a > 0.0 {
                 let pp = if in_list { p.with_clip_rect(lay.list_clip) } else { p.clone() };
-                text_trunc(&pp, pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, &name, font(14.5, "semibold"), tc.gamma_multiply(label_a), rect.width() - 50.0);
+                let room = if movable { 76.0 } else { 50.0 };
+                text_trunc(&pp, pos2(rect.left() + 42.0, rect.center().y), Align2::LEFT_CENTER, &name, font(14.5, "semibold"), tc.gamma_multiply(label_a), rect.width() - room);
+                // Editing: a grip says "drag me".
+                let grip = pos2(rect.right() - 16.0, rect.center().y);
+                if movable && (!in_list || lay.list_clip.contains(grip)) {
+                    icons.paint(ui, "grip-vertical", grip, 15.0, theme.text_dim().gamma_multiply(if row_hot { 1.0 } else { 0.55 }));
+                }
             }
         }
         if let Some(h) = hover_el {
@@ -1303,7 +1460,7 @@ impl Starlite {
         }
 
         // Selection pill glides between rows on a spring, stretching like gel.
-        let target = selected.as_ref().and_then(|k| lay.rows.iter().find(|(kk, _)| kk == k)).map(|(_, r)| *r);
+        let target = sel_target.map(|s| s.0);
         let vis_target = if target.is_some() { 1.0 } else { 0.0 };
         self.sel_vis += (vis_target - self.sel_vis) * (dt * 12.0).min(1.0);
         if (self.sel_vis - vis_target).abs() > 0.002 {
@@ -1330,7 +1487,7 @@ impl Starlite {
             let stretch = (self.sel_v.abs() * 0.03).min(16.0);
             let squeeze = (self.sel_v.abs() * 0.008).min(6.0);
             let mut pill_r = Rect::from_center_size(cur.center(), vec2(cur.width() - squeeze + 4.0 * sel_press, cur.height() + stretch + 4.0 * sel_press));
-            if matches!(selected, Some(NavKey::Playlist(_) | NavKey::NdLink(..))) {
+            if sel_target.is_some_and(|s| s.1) {
                 pill_r = pill_r.intersect(lay.list_clip);
             }
             if self.sel_vis > 0.002 && pill_r.width() > 1.0 && pill_r.height() > 1.0 {
@@ -1338,18 +1495,151 @@ impl Starlite {
             }
         }
 
-        // Collapse / expand arrow, under Settings. Points the way it'll move.
-        let cr = ui.interact(Rect::from_center_size(lay.collapse, Vec2::splat(30.0)), ui.id().with("nav_collapse"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-        let ch = ctx.animate_bool_with_time(ui.id().with("nav_collapse_h"), cr.hovered(), 0.16);
-        if ch > 0.001 {
-            els.push(El::rect(Rect::from_center_size(lay.collapse, Vec2::splat(26.0 + 4.0 * ch)), ppp, 15.0, ch, 3.0, Kind::Layered, 0.4 * ch, 0.0));
-        }
-        icons.paint_rotated(ui, "chevron-left", lay.collapse, 16.0, theme.text_dim(), std::f32::consts::PI * (1.0 - t));
-        if cr.on_hover_text(if self.nav_open { "Collapse sidebar" } else { "Expand sidebar" }).clicked() {
-            self.sound.click();
-            self.nav_open = !self.nav_open;
+        // Editing: "Add category" under the list.
+        let mut add_category = false;
+        if let Some(r) = lay.add_cat.filter(|r| lay.list_clip.intersects(*r)) {
+            let hit = r.intersect(lay.list_clip);
+            let resp = ui.interact(hit, ui.id().with("nav_add_cat"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let c = if resp.hovered() { theme.text() } else { theme.text_dim() };
+            let pp = p.with_clip_rect(lay.list_clip);
+            if lay.list_clip.contains(pos2(r.left() + 22.0, r.center().y)) {
+                icons.paint(ui, "plus", pos2(r.left() + 22.0, r.center().y), 16.0, c);
+            }
+            pp.text(pos2(r.left() + 42.0, r.center().y), Align2::LEFT_CENTER, "Add category", font(13.5, "semibold"), c);
+            add_category = resp.clicked();
         }
 
+        // Collapse / expand arrow, under Settings. Points the way it'll move.
+        if !editing {
+            let cr = ui.interact(Rect::from_center_size(lay.collapse, Vec2::splat(30.0)), ui.id().with("nav_collapse"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let ch = ctx.animate_bool_with_time(ui.id().with("nav_collapse_h"), cr.hovered(), 0.16);
+            if ch > 0.001 {
+                els.push(El::rect(Rect::from_center_size(lay.collapse, Vec2::splat(26.0 + 4.0 * ch)), ppp, 15.0, ch, 3.0, Kind::Layered, 0.4 * ch, 0.0));
+            }
+            icons.paint_rotated(ui, "chevron-left", lay.collapse, 16.0, theme.text_dim(), std::f32::consts::PI * (1.0 - t));
+            if cr.on_hover_text(if self.nav_open { "Collapse sidebar" } else { "Expand sidebar" }).clicked() {
+                self.sound.click();
+                self.nav_open = !self.nav_open;
+            }
+        }
+        // The pencil: edit the sidebar (a tick while editing: done).
+        let mut toggle_edit = false;
+        if label_a > 0.5 {
+            let er = ui.interact(Rect::from_center_size(lay.edit, Vec2::splat(30.0)), ui.id().with("nav_edit"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            let eh = ctx.animate_bool_with_time(ui.id().with("nav_edit_h"), er.hovered() || editing, 0.16);
+            if eh > 0.001 {
+                els.push(El::rect(Rect::from_center_size(lay.edit, Vec2::splat(26.0 + 4.0 * eh)), ppp, 15.0, eh, 3.0, Kind::Layered, 0.4 * eh, 0.0));
+            }
+            icons.paint(ui, if editing { "check" } else { "pencil" }, lay.edit, 15.0, if editing { theme.accent() } else { theme.text_dim() }.gamma_multiply(label_a));
+            toggle_edit = er.on_hover_text(if editing { "Done" } else { "Edit the sidebar: reorder, add categories" }).clicked();
+            if editing {
+                p.text(pos2(24.0, lay.edit.y), Align2::LEFT_CENTER, "Drag to reorder", font(12.0, "regular"), theme.text_dim());
+            }
+        }
+
+        // ── Edits ──
+        if let Some(e) = self.nav_edit.as_mut() {
+            let mut changed = false;
+            if let Some(i) = drag_start {
+                e.drag = Some(i);
+                e.rename = None;
+            }
+            // Dragging: the block goes where the pointer is among the others.
+            let down = ctx.input(|i| i.pointer.primary_down());
+            // Debug: STARLITE_NAV_DRAG=<entry>,<y> drags that entry (its place in the list) to height y, once.
+            static DRAGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            let fake = std::env::var("STARLITE_NAV_DRAG").ok().and_then(|v| {
+                let (i, y) = v.split_once(',')?;
+                Some((i.trim().parse::<usize>().ok()?, y.trim().parse::<f32>().ok()?))
+            });
+            let fake = fake.filter(|_| self.time > 1.0 && !DRAGGED.swap(true, Ordering::Relaxed));
+            let (drag, ptr, down) = match fake {
+                Some((i, y)) => (Some(i), Some(pos2(40.0, y)), true),
+                None => (e.drag, ctx.input(|i| i.pointer.interact_pos()), down),
+            };
+            match (drag, ptr) {
+                (Some(from), Some(ptr)) if down => {
+                    let len = self.nav.block_len(from);
+                    // Where every other entry is (hidden ones sit with the one before).
+                    let mut centers: Vec<f32> = Vec::new();
+                    let mut last = f32::NEG_INFINITY;
+                    for (i, _) in self.nav.items.iter().enumerate() {
+                        let y = if i == bottom { Some(lay.marker_y) } else { lay.rows.iter().find(|r| r.0 == i).map(|r| r.2.center().y).or_else(|| lay.headers.iter().find(|h| h.0 == i).map(|h| h.1.center().y)) };
+                        last = y.unwrap_or(last);
+                        if i < from || i >= from + len {
+                            centers.push(last);
+                        }
+                    }
+                    let to = centers.iter().filter(|&&c| c < ptr.y).count();
+                    if to != from {
+                        let now = self.nav.move_block(from, to);
+                        e.drag = fake.is_none().then_some(now);
+                        changed = true;
+                    }
+                    ctx.set_cursor_icon(CursorIcon::Grabbing);
+                    *animating = true;
+                }
+                (Some(_), _) => {
+                    e.drag = None;
+                    changed = true;
+                }
+                _ => {}
+            }
+            if let Some((i, text, finished)) = renamed {
+                if finished {
+                    let name = text.trim();
+                    if !name.is_empty() {
+                        self.nav.items[i] = NavItem::Header(name.to_string());
+                        changed = true;
+                    }
+                    e.rename = None;
+                } else {
+                    e.rename = Some((i, text));
+                }
+            }
+            if let Some(i) = start_rename {
+                if let NavItem::Header(n) = &self.nav.items[i] {
+                    e.rename = Some((i, n.clone()));
+                }
+            }
+            if let Some(i) = delete {
+                self.nav.items.remove(i);
+                e.rename = None;
+                e.drag = None;
+                changed = true;
+            }
+            if add_category {
+                let at = self.nav.add_header("New category");
+                e.rename = Some((at, "New category".to_string()));
+                // Bring it into view.
+                self.nav_scroll = f32::MAX;
+                changed = true;
+            }
+            let leaving = toggle_edit || (e.rename.is_none() && e.drag.is_none() && ctx.input(|i| i.key_pressed(egui::Key::Escape)));
+            if changed {
+                self.sound.tick(0.5);
+                self.nav.save();
+            }
+            if leaving {
+                self.sound.click();
+                self.nav_edit = None;
+                self.nav.save();
+            }
+            return;
+        }
+        if toggle_edit {
+            self.sound.click();
+            self.nav_edit = Some(NavEdit::default());
+            return;
+        }
+
+        if let Some(i) = new_under {
+            self.sound.click();
+            self.open_dialog(None);
+            if let Some(d) = self.dialog.as_mut() {
+                d.under = Some(i);
+            }
+        }
         if let Some((server, pl, at)) = right_clicked {
             self.sound.click();
             self.nd_menu = Some(NdMenu { server, at, pl, open_t: 0.0 });
@@ -1594,6 +1884,12 @@ impl Starlite {
             self.sound.click();
             let d = self.dialog.take().unwrap();
             let id = self.lib.create(name.clone(), d.cover);
+            // Into the sidebar: under the category it was started from.
+            self.nav.sync(&self.lib);
+            if let Some(h) = d.under {
+                self.nav.place_under(h, crate::nav::NavItem::Playlist(id.clone()));
+            }
+            self.nav.save();
             if let Some((tracks, _)) = &d.import {
                 let n = self.lib.add_many(&id, tracks);
                 self.toast(format!("Loaded {n} song{}", if n == 1 { "" } else { "s" }));

@@ -99,6 +99,15 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   can't use is shown with its line number next to the button. The file is
   read again whenever it's saved (looked at once a second while the Custom
   theme is on), and its values go on top of the picked colours.
+- **Sidebar layout** (`src/nav.rs`, `nav.json`): the sidebar is one ordered
+  list of entries (Explore, the servers, Liked, Downloaded, playlists,
+  server links) with category titles between them; what comes after the
+  `Bottom` marker is pinned above Settings, the rest scrolls. The pencil
+  under Settings starts edit mode: drag an entry to move it (a category
+  takes what's under it along, and dragging past the gap moves it between
+  the scrolling and the pinned part), click a category to rename it, x
+  removes it, "Add category" makes one. The + on a category starts a
+  playlist under it. Settings itself can't be moved.
 - **Services** (Settings → Services, `src/services.rs`): one menu for
   Navidrome, Jellyfin, YouTube, Discord and Last.fm, each with its
   settings beside it. Servers are signed in to here; the sidebar only
@@ -225,6 +234,7 @@ they stay sharp at any size and mid-animation.
 | `src/jellyfin.rs` | Jellyfin API client |
 | `src/lastfm.rs` | Last.fm scrobbling and its Settings tab |
 | `src/updater.rs` | update notice and install |
+| `src/nav.rs` | the sidebar's layout list and the moves on it |
 | `src/services.rs` | Settings → Services and the first-start welcome window |
 | `src/css.rs` | the Custom theme's CSS: parser and font lookup |
 | `src/fxpanel.rs` | the speed / bass dropdown above the player bar |
@@ -277,6 +287,8 @@ also MIT via Feather. They're free for public and commercial use, as long as
 | `STARLITE_M3U=<file>` | with `STARLITE_DIALOG`, load that .m3u into the dialog |
 | `STARLITE_SHOTS=dir,count,ms,delay` | save `count` window frames to `dir`, then quit |
 | `STARLITE_MUTE=1` | start muted |
+| `STARLITE_NAV_EDIT=1` | start with the sidebar in edit mode |
+| `STARLITE_NAV_DRAG=entry,y` | in edit mode, drag that entry to height y once |
 | `STARLITE_WELCOME=1` | show the first-start welcome window |
 | `STARLITE_SERVICE=0..4` | the service picked in Settings → Services |
 | `STARLITE_UPDATE_API=http://127.0.0.1:port/latest` | ask a test server on this PC for the latest release |

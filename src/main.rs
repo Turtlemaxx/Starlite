@@ -20,6 +20,7 @@ mod lyrics;
 mod m3u;
 mod meta;
 mod mini;
+mod nav;
 mod navidrome;
 mod nowplaying;
 mod pages;
