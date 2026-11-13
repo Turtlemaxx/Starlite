@@ -46,6 +46,8 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 **And also:** your own playlists (start one from an .m3u file if you like), Liked Music, local files with their real tags and covers, optional YouTube Music charts (played in YouTube's official player), shuffle and loop.
 
+**Updates.** Starlite tells you when a new version is out and installs it with one click (can be switched off in Settings → Appearance).
+
 ## Install
 
 1. Download `Starlite-0.3.0-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).

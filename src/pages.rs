@@ -676,6 +676,12 @@ impl Starlite {
                     self.shelf.prefs.enabled = on;
                     self.shelf.prefs.save();
                 }
+                let mut notify = self.updater.prefs.notify;
+                let r = Rect::from_min_size(pos2(x0, y + 60.0), vec2(content.width().min(520.0), 52.0));
+                if toggle_row(ui, r, Id::new("update_notify"), "Update notifications", Some(concat!("Says when a new version is out and can install it. You have ", env!("CARGO_PKG_VERSION"))), &mut notify, theme) {
+                    self.sound.click();
+                    self.updater.set_notify(notify, &ctx);
+                }
             }
             1 => self.playback_settings(ui, els, ppp, x0, top, content.width().min(560.0)),
             2 => self.equalizer_settings(ui, icons, els, ppp, x0, top, content),

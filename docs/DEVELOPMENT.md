@@ -99,6 +99,14 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   can't use is shown with its line number next to the button. The file is
   read again whenever it's saved (looked at once a second while the Custom
   theme is on), and its values go on top of the picked colours.
+- **Update notice** (`src/updater.rs`, `updates.json`): on start and every
+  six hours Starlite asks GitHub for its latest release. A newer one opens
+  a window with Install: the zip is downloaded (only from this repo's
+  release downloads), checked against the SHA-256 in the release notes,
+  unpacked with Windows' tar, the running exe is renamed to
+  `Starlite.old.exe`, the new one put in its place and started. Every
+  release's notes therefore need their `SHA-256:` line. Switched off under
+  Settings → Appearance → Update notifications; then nothing is asked.
 - **Liquid glass** (Settings → Appearance, off by default, `look.json`): off
   is the simple look: flat, slightly see-through panels with a hairline and
   a small shadow, calmer corners and ordinary app greys. Panels still blur
@@ -209,6 +217,7 @@ they stay sharp at any size and mid-animation.
 | `src/stream.rs` | how server songs are asked for (as stored / converted) |
 | `src/jellyfin.rs` | Jellyfin API client |
 | `src/lastfm.rs` | Last.fm scrobbling and its Settings tab |
+| `src/updater.rs` | update notice and install |
 | `src/css.rs` | the Custom theme's CSS: parser and font lookup |
 | `src/fxpanel.rs` | the speed / bass dropdown above the player bar |
 | `src/customize.rs` | custom theme settings and the colour picker |
@@ -260,6 +269,8 @@ also MIT via Feather. They're free for public and commercial use, as long as
 | `STARLITE_M3U=<file>` | with `STARLITE_DIALOG`, load that .m3u into the dialog |
 | `STARLITE_SHOTS=dir,count,ms,delay` | save `count` window frames to `dir`, then quit |
 | `STARLITE_MUTE=1` | start muted |
+| `STARLITE_UPDATE_API=http://127.0.0.1:port/latest` | ask a test server on this PC for the latest release |
+| `STARLITE_UPDATE_INSTALL=1` | press Install in the update window once |
 | `STARLITE_GLASS=1\|0` | force liquid glass on / off (doesn't change the saved setting) |
 | `STARLITE_EQ_SEL=0..10` | the equalizer slider picked at start |
 | `STARLITE_PAGE=jellyfin`, `STARLITE_JF_CONNECT=url\|user\|password` | like the Navidrome ones |

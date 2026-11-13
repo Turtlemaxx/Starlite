@@ -213,6 +213,8 @@ pub struct Starlite {
     /// The song lined up to follow the current one: (audio serial it follows, its place in the queue, its id).
     pub lined_up: Option<(u64, usize, String)>,
     pub sound_ui: crate::soundpage::SoundUi,
+    /// Looks for new versions and installs them.
+    pub updater: crate::updater::Updater,
     pub lastfm: crate::lastfm::LastFm,
     pub lfm_ui: crate::lastfm::LfmUi,
     last_advanced: u64,
@@ -483,6 +485,7 @@ impl Starlite {
             play_serial: 0,
             lined_up: None,
             sound_ui: Default::default(),
+            updater: crate::updater::Updater::start(&cc.egui_ctx),
             lastfm: crate::lastfm::LastFm::start(),
             lfm_ui: Default::default(),
             last_advanced: 0,
@@ -531,6 +534,10 @@ impl Starlite {
         }
         app.audio.set_speed(app.fx.speed);
         app.audio.set_fx(&app.fx);
+        // Just started by the updater.
+        if std::env::var("STARLITE_UPDATED").is_ok() {
+            app.toast(concat!("Updated to Starlite ", env!("CARGO_PKG_VERSION")));
+        }
         app.apply_theme(&cc.egui_ctx);
         if app.yt.configured() {
             app.load_explore(&cc.egui_ctx);
@@ -984,7 +991,7 @@ impl Starlite {
 
     /// A dropdown or dialog is open: the page under it must not react.
     pub fn overlay_open(&self) -> bool {
-        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some()
+        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some() || self.updater.open
     }
 
     pub fn now_is_youtube(&self) -> bool {
@@ -1799,6 +1806,7 @@ impl eframe::App for Starlite {
         let mut icons = std::mem::take(&mut self.icons);
 
         self.poll_jobs(ctx);
+        self.updater.tick(ctx);
 
         // The engine moved on to the lined-up song by itself (gapless / crossfade).
         let (advanced, on) = self.audio.advanced();
@@ -2042,6 +2050,9 @@ impl eframe::App for Starlite {
             }
             if self.color_pick.is_some() {
                 self.draw_color_pick(ui, ppp, dt, full, time, nav_w, &mut animating);
+            }
+            if self.updater.open {
+                self.draw_update(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
             }
         });
 

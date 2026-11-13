@@ -31,6 +31,7 @@ mod soundpage;
 mod stream;
 mod theme;
 mod tree;
+mod updater;
 mod widgets;
 mod win;
 mod youtube;
