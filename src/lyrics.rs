@@ -279,6 +279,13 @@ fn enc(s: &str) -> String {
 
 /// Title and artist as lrclib knows them. YouTube titles are often
 /// "Artist - Song (Official Video)" on the artist's channel.
+/// A song's artist and title as a catalogue knows them: YouTube videos
+/// lose the channel's "VEVO" / "- Topic" and the title's "(Official
+/// Video)", and "Artist - Song" titles are split.
+pub fn clean_names(t: &Track) -> Option<(String, String)> {
+    query(t).map(|q| (q.artist, q.title))
+}
+
 fn query(t: &Track) -> Option<Query> {
     let mut artist = t.artist.trim().to_string();
     let mut title = t.title.trim().to_string();

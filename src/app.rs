@@ -2097,7 +2097,7 @@ impl eframe::App for Starlite {
             self.discord.update(&self.dprefs, now.as_ref(), playing, pos, dur);
             // Last.fm: now playing, and a scrobble once enough of the song was heard.
             let heard = self.playback_status() == Status::Playing;
-            self.lastfm.update(now.as_ref(), self.play_serial, heard);
+            self.lastfm.update(now.as_ref(), self.play_serial, heard, pos, dur);
         }
 
         if !ctx.input(|i| i.viewport().maximized.unwrap_or(false)) {

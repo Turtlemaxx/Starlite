@@ -72,7 +72,14 @@ pub struct Play {
 
 impl Play {
     fn of(t: &Track, at: u64) -> Play {
-        Play { artist: t.artist.clone(), title: t.title.clone(), album: t.album.clone().filter(|a| !a.is_empty()), secs: t.duration_ms / 1000, at }
+        // YouTube videos are named for their channel and video; Last.fm wants artist and song.
+        let (artist, title) = crate::lyrics::clean_names(t).unwrap_or_else(|| (t.artist.clone(), t.title.clone()));
+        let album = t.album.clone().filter(|a| !a.trim().is_empty() && t.youtube_id().is_none());
+        Play { artist, title, album, secs: t.duration_ms / 1000, at }
+    }
+
+    fn label(&self) -> String {
+        format!("{} by {}", self.title, self.artist)
     }
 }
 
@@ -97,13 +104,34 @@ pub struct Report {
     pub session: Option<(String, String)>,
 }
 
+/// The play being listened to.
+struct Current {
+    /// (song id, play serial)
+    key: (String, u64),
+    play: Play,
+    /// Seconds of it heard so far.
+    heard: f64,
+    last_pos: f64,
+    /// "Now playing" was sent for it.
+    announced: bool,
+    scrobbled: bool,
+}
+
+impl Current {
+    /// At the very end of the song there's nothing left to announce.
+    fn scrobbled_out(&self, dur: f64, pos: f64) -> bool {
+        dur > 0.0 && pos >= dur - 1.0
+    }
+}
+
 pub struct LastFm {
     tx: Sender<Msg>,
     pub prefs: LfmPrefs,
     pub report: Arc<Mutex<Report>>,
-    /// The play being listened to: (song id, play serial), what to send, seconds heard, scrobbled.
-    current: Option<((String, u64), Play, f64, bool)>,
+    current: Option<Current>,
     last_frame: Instant,
+    /// When playback was last seen running (a long pause announces the song again).
+    last_playing: Instant,
 }
 
 /// The fields of the settings tab.
@@ -161,6 +189,20 @@ fn call(method: &str, mut params: Vec<(&str, String)>, secret: &str) -> Result<V
     match v["error"].as_i64() {
         Some(code) => Err((code, v["message"].as_str().unwrap_or("Last.fm refused the request").to_string())),
         None => Ok(v),
+    }
+}
+
+/// Why Last.fm ignored a song (its `ignoredMessage`), if it did.
+fn ignored(m: &Value) -> Option<&'static str> {
+    let code = m["code"].as_str().map(str::to_string).or_else(|| m["code"].as_i64().map(|c| c.to_string()))?;
+    match code.as_str() {
+        "" | "0" => None,
+        "1" => Some("it doesn't accept that artist name"),
+        "2" => Some("it doesn't accept that song name"),
+        "3" => Some("the time of the play is too far back"),
+        "4" => Some("this PC's clock is ahead"),
+        "5" => Some("today's scrobble limit is reached"),
+        _ => Some("it gave no reason"),
     }
 }
 
@@ -234,16 +276,16 @@ fn worker(rx: Receiver<Msg>, report: Arc<Mutex<Report>>) {
                     Err(e) => r.status = Some((false, e)),
                 }
             }
-            Msg::NowPlaying(prefs, play) => {
-                if let Err((code, m)) = call("track.updateNowPlaying", play_params(&play, &prefs), &prefs.secret) {
-                    // 9: the session was revoked on last.fm.
-                    if code == 9 {
-                        say(false, "Last.fm signed you out. Connect again.".to_string());
-                    } else if code != 0 {
-                        say(false, format!("Last.fm: {m}"));
-                    }
-                }
-            }
+            Msg::NowPlaying(prefs, play) => match call("track.updateNowPlaying", play_params(&play, &prefs), &prefs.secret) {
+                Ok(v) => match ignored(&v["nowplaying"]["ignoredMessage"]) {
+                    Some(why) => say(false, format!("Last.fm won't show \u{201c}{}\u{201d}: {why}", play.title)),
+                    None => say(true, format!("Now playing sent: {}", play.label())),
+                },
+                // 9: the session was revoked on last.fm.
+                Err((9, _)) => say(false, "Last.fm signed you out. Connect again.".to_string()),
+                Err((0, m)) => say(false, m),
+                Err((_, m)) => say(false, format!("Last.fm: {m}")),
+            },
             Msg::Scrobble(prefs, play) => {
                 queue.push(play);
                 // Oldest first; stop at the first one that can't go out now.
@@ -251,11 +293,20 @@ fn worker(rx: Receiver<Msg>, report: Arc<Mutex<Report>>) {
                     let mut params = play_params(&p, &prefs);
                     params.push(("timestamp", p.at.to_string()));
                     match call("track.scrobble", params, &prefs.secret) {
-                        Ok(_) => {
+                        Ok(v) => {
                             queue.remove(0);
+                            let sc = &v["scrobbles"]["scrobble"];
+                            // (One scrobble comes back as an object, several as a list.)
+                            match ignored(&sc["ignoredMessage"]).or_else(|| ignored(&sc[0]["ignoredMessage"])) {
+                                Some(why) => say(false, format!("Last.fm didn't take \u{201c}{}\u{201d}: {why}", p.title)),
+                                None => say(true, format!("Scrobbled: {}", p.label())),
+                            }
                         }
                         // Offline or Last.fm is down (11, 16): try again with the next song.
-                        Err((0 | 11 | 16, _)) => break,
+                        Err((0 | 11 | 16, m)) => {
+                            say(false, format!("{m}. {} waiting to be sent.", if queue.len() == 1 { "1 scrobble is".to_string() } else { format!("{} scrobbles are", queue.len()) }));
+                            break;
+                        }
                         Err((9, _)) => {
                             say(false, "Last.fm signed you out. Connect again.".to_string());
                             break;
@@ -286,7 +337,7 @@ impl LastFm {
         let report = Arc::new(Mutex::new(Report::default()));
         let r = report.clone();
         std::thread::Builder::new().name("lastfm".into()).spawn(move || worker(rx, r)).expect("spawn lastfm thread");
-        let mut me = Self { tx, prefs: LfmPrefs::load(), report, current: None, last_frame: Instant::now() };
+        let mut me = Self { tx, prefs: LfmPrefs::load(), report, current: None, last_frame: Instant::now(), last_playing: Instant::now() };
         // Debug: STARLITE_LASTFM_CONNECT=key|secret starts connecting at once.
         if let Some((k, s)) = std::env::var("STARLITE_LASTFM_CONNECT").ok().as_deref().and_then(|v| v.split_once('|')) {
             me.connect(k, s);
@@ -299,9 +350,10 @@ impl LastFm {
     }
 
     /// Every frame: follows what's playing and sends what's due.
-    /// `serial` goes up with every play (also of the same song again).
-    pub fn update(&mut self, track: Option<&Track>, serial: u64, playing: bool) {
-        let dt = self.last_frame.elapsed().as_secs_f64().min(10.0);
+    /// `serial` goes up with every play (also of the same song again);
+    /// `pos` / `dur`: where playback is and the song's length (seconds).
+    pub fn update(&mut self, track: Option<&Track>, serial: u64, playing: bool, pos: f64, dur: f64) {
+        let wall = self.last_frame.elapsed().as_secs_f64();
         self.last_frame = Instant::now();
         // A finished sign-in.
         let session = self.report.lock().unwrap().session.take();
@@ -311,26 +363,45 @@ impl LastFm {
             self.prefs.enabled = true;
             self.prefs.save();
         }
+        let active = self.active();
         let Some(t) = track else {
             self.current = None;
             return;
         };
         let key = (t.id.clone(), serial);
-        if self.current.as_ref().map(|c| &c.0) != Some(&key) {
-            let play = Play::of(t, unix_now());
-            self.current = Some((key, play.clone(), 0.0, false));
-            if self.active() {
-                let _ = self.tx.send(Msg::NowPlaying(self.prefs.clone(), play));
-            }
+        if self.current.as_ref().map(|c| &c.key) != Some(&key) {
+            self.current = Some(Current { key, play: Play::of(t, unix_now()), heard: 0.0, last_pos: pos, announced: false, scrobbled: false });
         }
-        let active = self.active();
-        let Some((_, play, heard, done)) = self.current.as_mut() else { return };
+        let paused_for = self.last_playing.elapsed();
         if playing {
-            *heard += dt;
+            self.last_playing = Instant::now();
         }
-        if !*done && active && scrobble_after(play.secs).is_some_and(|need| *heard >= need) {
-            *done = true;
-            let _ = self.tx.send(Msg::Scrobble(self.prefs.clone(), play.clone()));
+        let Some(c) = self.current.as_mut() else { return };
+        // Songs whose length the list didn't know (YouTube): the player does.
+        if c.play.secs == 0 && dur >= 1.0 {
+            c.play.secs = dur.round() as u64;
+        }
+        // Count what was really heard: playback moving forward at about the
+        // clock's pace (up to 2x speed). A jump on the seek bar isn't listening.
+        let moved = pos - c.last_pos;
+        if moved > 0.0 && moved <= wall * 2.2 + 1.5 {
+            c.heard += moved;
+        }
+        c.last_pos = pos;
+        if !active {
+            // Switched on (or connected) mid-song: it's announced then.
+            c.announced = false;
+            return;
+        }
+        // "Now playing": when a song starts, when Last.fm gets connected or
+        // switched on during one, and again after a pause of over a minute.
+        if playing && (!c.announced || paused_for > Duration::from_secs(60)) && !c.scrobbled_out(dur, pos) {
+            c.announced = true;
+            let _ = self.tx.send(Msg::NowPlaying(self.prefs.clone(), c.play.clone()));
+        }
+        if !c.scrobbled && scrobble_after(c.play.secs).is_some_and(|need| c.heard >= need) {
+            c.scrobbled = true;
+            let _ = self.tx.send(Msg::Scrobble(self.prefs.clone(), c.play.clone()));
         }
     }
 
@@ -442,9 +513,18 @@ impl Starlite {
             p.galley(pos2(x0, y + 2.0), g, theme.text_dim());
         }
         if connected {
-            if let Some((false, msg)) = &status {
-                text_trunc(&p, pos2(x0, y + 46.0), Align2::LEFT_CENTER, msg, font(12.5, "semibold"), Color32::from_rgb(235, 90, 100), w);
+            // What was last sent, or what went wrong.
+            let line = match &status {
+                Some((ok, msg)) if !msg.starts_with("Connected as") => Some((*ok, msg.clone())),
+                _ if !self.lastfm.prefs.enabled => Some((true, "Scrobbling is switched off".to_string())),
+                _ => Some((true, "Nothing sent yet: play a song".to_string())),
+            };
+            if let Some((ok, msg)) = line {
+                let c = if ok { theme.text() } else { Color32::from_rgb(235, 90, 100) };
+                p.text(pos2(x0, y + 50.0), Align2::LEFT_CENTER, "Latest", font(12.0, "semibold"), theme.text_dim());
+                text_trunc(&p, pos2(x0 + 52.0, y + 50.0), Align2::LEFT_CENTER, &msg, font(12.5, "semibold"), c, w - 52.0);
             }
+            ctx.request_repaint_after(std::time::Duration::from_millis(700));
         }
     }
 }
@@ -459,6 +539,65 @@ mod tests {
         let s = sign(&[("token", "yyy".into()), ("method", "auth.getSession".into()), ("api_key", "xxx".into())], "ilovecher");
         assert_eq!(s, crate::navidrome::md5_hex("api_keyxxxmethodauth.getSessiontokenyyyilovecher"));
         assert_eq!(s.len(), 32);
+    }
+
+    #[test]
+    fn youtube_videos_are_sent_as_artist_and_song() {
+        let yt = Track { id: "youtube:a".into(), title: "Kanye West - All Falls Down (Official Video) [HD]".into(), artist: "KanyeWestVEVO".into(), album: Some("x".into()), artwork: None, permalink: None, duration_ms: 0, source: crate::library::Source::YouTube { video_id: "a".into() } };
+        let p = Play::of(&yt, 5);
+        assert_eq!((p.artist.as_str(), p.title.as_str(), p.album.clone(), p.secs), ("Kanye West", "All Falls Down", None, 0));
+        let file = Track { title: "505".into(), artist: "Arctic Monkeys".into(), album: Some("Favourite Worst Nightmare".into()), duration_ms: 253_000, source: crate::library::Source::File { path: "a.mp3".into() }, ..yt };
+        let p = Play::of(&file, 5);
+        assert_eq!((p.artist.as_str(), p.title.as_str(), p.album.as_deref(), p.secs), ("Arctic Monkeys", "505", Some("Favourite Worst Nightmare"), 253));
+        assert_eq!(p.label(), "505 by Arctic Monkeys");
+    }
+
+    #[test]
+    fn listening_counts_but_seeking_doesnt() {
+        let (tx, rx) = channel();
+        let mut l = LastFm { tx, prefs: LfmPrefs { enabled: true, session: "s".into(), ..Default::default() }, report: Default::default(), current: None, last_frame: Instant::now(), last_playing: Instant::now() };
+        let t = Track { id: "f".into(), title: "Song".into(), artist: "Artist".into(), album: None, artwork: None, permalink: None, duration_ms: 0, source: crate::library::Source::File { path: "a.mp3".into() } };
+        // The song starts: announced at once, with the length the player knows.
+        l.update(Some(&t), 1, true, 0.0, 200.0);
+        assert!(matches!(rx.try_recv(), Ok(Msg::NowPlaying(_, p)) if p.secs == 200));
+        // Jumping to 3:00 on the seek bar isn't three minutes of listening.
+        l.update(Some(&t), 1, true, 180.0, 200.0);
+        assert!(rx.try_recv().is_err());
+        assert!(l.current.as_ref().unwrap().heard < 1.0);
+        // Real listening adds up to the scrobble (half of 200 s).
+        l.current.as_mut().unwrap().heard = 99.5;
+        l.last_frame = Instant::now() - Duration::from_secs(1);
+        l.update(Some(&t), 1, true, 181.0, 200.0);
+        assert!(matches!(rx.try_recv(), Ok(Msg::Scrobble(_, p)) if p.title == "Song"));
+        // Only once.
+        l.update(Some(&t), 1, true, 181.5, 200.0);
+        assert!(rx.try_recv().is_err());
+        // The same song again is a new play.
+        l.update(Some(&t), 2, true, 0.0, 200.0);
+        assert!(matches!(rx.try_recv(), Ok(Msg::NowPlaying(..))));
+    }
+
+    #[test]
+    fn connecting_mid_song_announces_it() {
+        let (tx, rx) = channel();
+        let mut l = LastFm { tx, prefs: LfmPrefs::default(), report: Default::default(), current: None, last_frame: Instant::now(), last_playing: Instant::now() };
+        let t = Track { id: "f".into(), title: "Song".into(), artist: "Artist".into(), album: None, artwork: None, permalink: None, duration_ms: 200_000, source: crate::library::Source::File { path: "a.mp3".into() } };
+        l.update(Some(&t), 1, true, 10.0, 200.0);
+        assert!(rx.try_recv().is_err());
+        // You allow Starlite on last.fm while the song plays on.
+        l.report.lock().unwrap().session = Some(("key".into(), "me".into()));
+        l.update(Some(&t), 1, true, 10.5, 200.0);
+        assert!(matches!(rx.try_recv(), Ok(Msg::NowPlaying(_, p)) if p.title == "Song"));
+        assert!(l.prefs.enabled && l.prefs.connected());
+    }
+
+    #[test]
+    fn last_fms_reasons_are_read() {
+        let v: Value = serde_json::from_str(r##"{"ok":{"code":"0","#text":""},"artist":{"code":"1","#text":"Artist name failed filter"},"num":{"code":3}}"##).unwrap();
+        assert_eq!(ignored(&v["ok"]), None);
+        assert_eq!(ignored(&v["artist"]), Some("it doesn't accept that artist name"));
+        assert_eq!(ignored(&v["num"]), Some("the time of the play is too far back"));
+        assert_eq!(ignored(&v["missing"]), None);
     }
 
     #[test]
