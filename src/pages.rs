@@ -163,12 +163,12 @@ impl Starlite {
         if !self.yt.configured() {
             let b = Rect::from_min_size(pos2(content.left(), 96.0), vec2(content.width().min(620.0), 186.0));
             els.push(El::rect(b, ppp, 26.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0));
-            icons.paint(ui, "play", pos2(b.left() + 38.0, b.top() + 42.0), 22.0, theme.accent());
+            icons.paint(ui, "youtube", pos2(b.left() + 38.0, b.top() + 42.0), 24.0, theme.accent());
             p.text(pos2(b.left() + 62.0, b.top() + 42.0), Align2::LEFT_CENTER, "Connect YouTube", font(18.0, "bold"), theme.text());
             p.text(pos2(b.left() + 26.0, b.top() + 78.0), Align2::LEFT_CENTER, "Sign in with Google (or add an API key in Settings)", font(13.5, "regular"), theme.text_dim());
             p.text(pos2(b.left() + 26.0, b.top() + 98.0), Align2::LEFT_CENTER, "to see YouTube Music's charts and chart playlists here.", font(13.5, "regular"), theme.text_dim());
             let r = Rect::from_min_size(pos2(b.left() + 26.0, b.bottom() - 60.0), vec2(200.0, 38.0));
-            if pill(ui, icons, els, ppp, Id::new("explore_signin"), r, "Sign in with Google", Some("play"), true, true, theme).clicked() {
+            if pill(ui, icons, els, ppp, Id::new("explore_signin"), r, "Sign in with Google", Some("youtube"), true, true, theme).clicked() {
                 self.sound.click();
                 if self.yt.can_sign_in() {
                     self.sign_in_youtube(&ctx);
@@ -788,7 +788,7 @@ impl Starlite {
         } else {
             let r = Rect::from_min_size(pos2(x0, yy), vec2(200.0, 38.0));
             let label = if self.yt_busy { "Waiting for browser…" } else { "Sign in with Google" };
-            let resp = pill(ui, icons, els, ppp, Id::new("yt_signin"), r, label, Some("play"), true, false, theme);
+            let resp = pill(ui, icons, els, ppp, Id::new("yt_signin"), r, label, Some("youtube"), true, false, theme);
             if resp.clicked() {
                 self.sound.click();
                 if self.yt.can_sign_in() {

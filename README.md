@@ -52,7 +52,7 @@ Starlite is mainly made for your **local music** and your **Navidrome** server, 
 
 ## Install
 
-1. Download `Starlite-0.3.3-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
+1. Download `Starlite-0.3.4-windows-x64.zip` from [Releases](https://github.com/Turtlemaxx/Starlite/releases/latest).
 2. Unzip it anywhere and run `Starlite.exe`.
 
 Needs 64-bit Windows 10 or 11. YouTube playback uses Microsoft Edge WebView2, which Windows 11 already has.
@@ -77,4 +77,4 @@ Needs Rust (MSVC toolchain) on Windows. Notes on how it's built are in [docs/DEV
 
 ## Credits
 
-Icons by [Lucide](https://lucide.dev) (ISC license, see `assets/icons/LICENSE`).
+Icons by [Lucide](https://lucide.dev) (ISC license, see `assets/icons/LICENSE`). The YouTube, Discord, Last.fm, Jellyfin and Navidrome logos are trademarks of their owners and only mark those services (sources in `assets/icons/BRANDS.md`); Starlite is not affiliated with them.

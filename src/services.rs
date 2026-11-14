@@ -15,7 +15,7 @@ use crate::widgets::{field, font, pill, text_trunc};
 pub const TAB: usize = 6;
 
 /// The menu: name and icon, in this order.
-pub const SERVICES: [(&str, &str); 5] = [("Navidrome", "cloudy"), ("Jellyfin", "server"), ("YouTube", "play"), ("Discord", "headphones"), ("Last.fm", "radio")];
+pub const SERVICES: [(&str, &str); 5] = [("Navidrome", "navidrome"), ("Jellyfin", "jellyfin"), ("YouTube", "youtube"), ("Discord", "discord"), ("Last.fm", "lastfm")];
 
 const GOOD: Color32 = Color32::from_rgb(70, 190, 120);
 const BAD: Color32 = Color32::from_rgb(235, 90, 100);

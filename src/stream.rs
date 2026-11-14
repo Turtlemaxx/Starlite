@@ -22,8 +22,8 @@ impl Server {
 
     pub fn icon(self) -> &'static str {
         match self {
-            Server::Navidrome => "cloudy",
-            Server::Jellyfin => "server",
+            Server::Navidrome => "navidrome",
+            Server::Jellyfin => "jellyfin",
         }
     }
 }
