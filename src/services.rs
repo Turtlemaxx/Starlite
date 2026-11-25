@@ -192,7 +192,7 @@ impl Starlite {
         let x0 = panel.left() + 30.0;
         let w = panel.width() - 60.0;
         p.text(pos2(x0, panel.top() + 38.0), Align2::LEFT_CENTER, "Welcome to Starlite", font(22.0, "bold"), fg);
-        let intro = "Have a music server? Connect Navidrome, Jellyfin or both now: fill in the ones you use. You can always do this later in Settings \u{2192} Services.";
+        let intro = "Have a music server? Connect Navidrome, Jellyfin or both now: fill in the ones you use. You can always do this later in Settings.";
         let g = p.layout(intro.to_string(), font(13.0, "regular"), dim, w);
         p.galley(pos2(x0, panel.top() + 60.0), g, dim);
 

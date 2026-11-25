@@ -7,6 +7,9 @@ fn main() {
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let from = std::env::var("STARLITE_SETUP_PAYLOAD").ok().map(std::path::PathBuf::from);
     for name in ["Starlite.exe", "THIRD-PARTY-NOTICES.txt"] {
+        if let Some(d) = &from {
+            println!("cargo:rerun-if-changed={}", d.join(name).display());
+        }
         let bytes = from.as_ref().and_then(|d| std::fs::read(d.join(name)).ok()).unwrap_or_default();
         if from.is_some() && bytes.is_empty() {
             panic!("STARLITE_SETUP_PAYLOAD has no {name}");

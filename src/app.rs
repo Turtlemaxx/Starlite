@@ -287,6 +287,15 @@ fn install_fonts(ctx: &egui::Context, family: Option<&str>) -> bool {
         let key = if name == "regular" { FontFamily::Proportional } else { FontFamily::Name(name.into()) };
         fonts.families.insert(key, fam);
     }
+    // Linux: a font with arrows and other symbols behind the UI font, for
+    // the characters it doesn't have.
+    #[cfg(not(windows))]
+    if let Some(bytes) = crate::css::pick_fonts(&table, "DejaVu Sans").and_then(|[regular, ..]| std::fs::read(regular).ok()) {
+        fonts.font_data.insert("fallback".into(), Arc::new(FontData::from_owned(bytes)));
+        for fam in fonts.families.values_mut() {
+            fam.push("fallback".into());
+        }
+    }
     ctx.set_fonts(fonts);
     found
 }
