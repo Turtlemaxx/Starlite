@@ -15,7 +15,9 @@ use eframe::glow::{self, HasContext};
 use crate::theme::BgImage;
 use crate::tree::TreeImage;
 
-pub const MAX_EL: usize = 24;
+/// The most panels / buttons drawn at once. Anything past it would be
+/// dropped for that frame (it blinked), so keep well clear of it.
+pub const MAX_EL: usize = 48;
 
 const VS: &str = r#"#version 330 core
 const vec2 V[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
@@ -24,7 +26,7 @@ void main() { gl_Position = vec4(V[gl_VertexID], 0.0, 1.0); }
 
 const FS: &str = r#"#version 330 core
 out vec4 o;
-#define MAX_EL 24
+#define MAX_EL 48
 
 uniform vec2  u_res;            // framebuffer size (px)
 uniform float u_ppp;            // pixels per point
@@ -50,11 +52,22 @@ uniform int   u_light_ui;       // custom theme: light background, light glass
 uniform sampler2D u_img;        // custom theme: background picture
 uniform float u_has_img;
 uniform vec2  u_img_size;       // picture size (texels)
-uniform int   u_flat;           // 1: simple flat panels instead of liquid glass
+uniform int   u_flat;           // 1: simple flat panels instead of glass
+uniform int   u_style;          // 0 simple, 1 glass (frosted, no bending), 2 liquid glass
+uniform float u_solid;          // how solid panels are (1: the look's own)
+uniform float u_outline;        // strength of panel edges (1: the look's own)
+uniform float u_shadow;         // strength of shadows (1: the look's own)
+uniform float u_amount;         // how much a moving background has (1: normal)
+uniform int   u_accent_on;      // 1: u_accent is the accent for every theme
+uniform int   u_bg_album;       // 1: the page background is the cover's colours
 uniform vec4  u_cls[3];         // fill of panels / the sidebar / the player bar (a < 0: the look's own)
 uniform vec4  u_edge;           // flat: hairline round panels (a < 0: the look's own)
 uniform float u_round;          // largest corner radius of panels, px (pills and circles stay round)
 uniform float u_frost;          // how far panels blur what's behind them, px
+uniform int   u_desktop;        // 1: the window is see-through; Windows blurs the desktop behind it
+
+// See-through window: how opaque this pixel is (the colour is kept unpremultiplied until the end).
+float g_a = 1.0;
 
 float hash1(float n) { return fract(sin(n * 127.1) * 43758.5453); }
 float hash2(vec2 p) { return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
@@ -73,7 +86,8 @@ vec3 bg_color() {
 // Sakura petals drifting down from the canopy, fluttering as they fall.
 vec4 petals(vec2 p, float blur) {
     vec4 acc = vec4(0.0);
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 60; i++) {
+        if (float(i) >= 30.0 * u_amount) break;
         float f = float(i);
         float h1 = hash1(f + 0.13), h2 = hash1(f * 1.91 + 3.7), h3 = hash1(f * 2.73 + 9.1);
         float dur = 10.0 + 8.0 * h2;
@@ -118,7 +132,7 @@ vec3 stars(vec2 p, float blur) {
             for (int dx = -1; dx <= 1; dx++) {
                 vec2 cid = id + vec2(float(dx), float(dy)) + big * 131.7;
                 float h = hash2(cid);
-                if (h > mix(0.42, 0.55, big)) continue;
+                if (h > min(mix(0.42, 0.55, big) * u_amount, 0.95)) continue;
                 float h2 = hash2(cid + 3.1), h3 = hash2(cid + 7.7), h4 = hash2(cid + 11.3);
                 vec2 pos = (floor(p / cell) + vec2(float(dx), float(dy)) + 0.15 + 0.7 * vec2(h2, h3)) * cell;
                 vec2 d = p - pos;
@@ -163,7 +177,8 @@ vec3 bubbles_bg(vec2 p) {
 // that spreads and a few droplets that fly off.
 vec3 bubbles(vec2 p, float blur) {
     vec3 c = bubbles_bg(p);
-    for (int i = 0; i < 20; i++) {
+    for (int i = 0; i < 40; i++) {
+        if (float(i) >= 20.0 * u_amount) break;
         float f = float(i);
         float dur = 11.0 + 8.0 * hash1(f * 1.37 + 0.21);
         float cyc = u_time / dur + hash1(f * 2.91 + 0.7);
@@ -268,14 +283,22 @@ vec3 album_bg(vec2 p) {
     return col * 0.62;
 }
 
+// The cover's colours behind the pages: deep under light text, pale under
+// dark text.
+vec3 album_page(vec2 p) {
+    vec3 a = album_bg(p);
+    return light_ui() ? mix(a / 0.62, vec3(1.0), 0.80) : a;
+}
+
 vec3 backdrop(vec2 p, float blur) {
     vec3 c = bg_color();
     if (u_fs > 0.001) {
         vec3 a = album_bg(p);
         if (u_fs >= 0.999) return a;
-        c = mix(c, a, u_fs);
+        c = mix(u_bg_album == 1 ? album_page(p) : c, a, u_fs);
         return c;
     }
+    if (u_bg_album == 1) return album_page(p);
     if (u_theme == 2) {
         vec4 t = tree(p, blur);
         c = c * (1.0 - t.a) + t.rgb;
@@ -307,11 +330,12 @@ vec3 track(vec3 col, vec2 p, int i) {
     float cov = clamp(0.5 - d, 0.0, 1.0);
     if (cov <= 0.0) return col;
     float fill_x = R.x - R.z + 2.0 * R.z * u_fx[i].z;
-    vec3 on = u_theme == 5 ? u_accent
+    vec3 on = (u_theme == 5 || u_accent_on == 1) ? u_accent
             : (light_ui() ? vec3(0.20, 0.20, 0.23)
             : (u_theme == 2 ? vec3(1.0, 0.74, 0.81) : (u_theme == 4 ? vec3(0.78, 0.92, 1.0) : vec3(0.93))));
     vec3 off = light_ui() ? mix(col, vec3(0.55), 0.35) : mix(col, vec3(1.0), 0.16);
     vec3 c = mix(off, on, clamp(fill_x - p.x + 0.5, 0.0, 1.0));
+    if (u_desktop == 1) g_a = mix(g_a, 0.9, cov);
     return mix(col, c, cov);
 }
 
@@ -329,7 +353,7 @@ vec3 progress(vec3 c, vec2 p, int i, float d) {
     if (fill < 0.0) return c;
     float fx = R.x - R.z + 2.0 * R.z * fill;
     float f = clamp(fx - p.x + 0.5, 0.0, 1.0);
-    vec3 tint = u_theme == 5 ? mix(c, u_accent, 0.18)
+    vec3 tint = (u_theme == 5 || u_accent_on == 1) ? mix(c, u_accent, 0.18)
               : (light_ui() ? c * 0.93 : (u_theme == 2 ? mix(c, vec3(1.0, 0.72, 0.80), 0.16) : c + vec3(0.065)));
     c = mix(c, tint, f);
     // Bright playhead line.
@@ -337,9 +361,26 @@ vec3 progress(vec3 c, vec2 p, int i, float d) {
     return c + head * (light_ui() ? 0.0 : 0.35) - head * (light_ui() ? 0.25 : 0.0);
 }
 
-// The simple look: flat, slightly see-through panels with a hairline and a
-// small soft shadow. No bending, no reflections. Panels still blur what's
-// behind them a little, so pictures and moving backgrounds stay calm.
+// Glass the way Windows' Acrylic and Apple's materials do it: the blurred
+// backdrop gets a little more saturation, then its brightness is pulled
+// towards a fixed level (dark in a dark window, light in a light one) while
+// its colour stays. That luminosity step is what keeps text readable on any
+// background, bright or dark. A tint on top, then a fine grain.
+vec3 acrylic(vec3 b, vec2 p, bool light, float keep, float tint_a, vec3 tint) {
+    float l = dot(b, vec3(0.2126, 0.7152, 0.0722));
+    vec3 sat = clamp(mix(vec3(l), b, 1.4), 0.0, 1.0);
+    float target = light ? 0.95 : 0.13;
+    float nl = mix(target, l, keep);
+    // Scale the colour to the new brightness (near-black has no colour to keep).
+    vec3 c = mix(vec3(nl), sat * (nl / max(l, 1e-3)), smoothstep(0.02, 0.12, l));
+    c = clamp(c, 0.0, 1.0);
+    c = mix(c, tint, clamp(tint_a, 0.0, 1.0));
+    return c + (hash2(floor(p)) - 0.5) * (light ? 0.010 : 0.014);
+}
+
+// The flat looks: panels with a hairline and a small soft shadow, no
+// bending, no reflections. Simple: solid (nothing shows through). Glass: the
+// same panels, see-through, with what's behind them blurred.
 vec3 flat_layer(vec3 col, vec2 p, int i, int kind, int cls, bool over) {
     vec4 R = u_rect[i];
     vec4 P = u_prop[i];
@@ -351,9 +392,11 @@ vec3 flat_layer(vec3 col, vec2 p, int i, int kind, int cls, bool over) {
     if (d > sh * 5.0 * u_ppp + 4.0) return col;
 
     vec3 shadowed = col;
-    if (kind == 0 && cls != 1) {
+    float a_under = g_a;
+    if (u_desktop == 1) {
+    } else if (kind == 0 && cls != 1) {
         float ds = sdf(p - vec2(0.0, sh * 0.3 * u_ppp), R, rad);
-        shadowed = col * (1.0 - s * (light ? 0.06 : 0.24) * exp(-max(ds, 0.0) / (sh * 1.3 * u_ppp + 1.0)));
+        shadowed = col * (1.0 - min(s * (light ? 0.06 : 0.24) * u_shadow, 0.9) * exp(-max(ds, 0.0) / (sh * 1.3 * u_ppp + 1.0)));
     } else if (kind == 3) {
         float ds = sdf(p - vec2(0.0, 1.0 * u_ppp), R, rad);
         shadowed = col * (1.0 - s * (light ? 0.22 : 0.40) * exp(-max(ds, 0.0) / (2.5 * u_ppp)));
@@ -365,27 +408,63 @@ vec3 flat_layer(vec3 col, vec2 p, int i, int kind, int cls, bool over) {
     vec4 edge = u_edge.a >= 0.0 ? u_edge : (light ? vec4(0.0, 0.0, 0.0, 0.10) : vec4(1.0, 1.0, 1.0, 0.085));
     float line = 1.0 - smoothstep(0.0, 1.0 * u_ppp, -d);
     if (kind == 0) {
-        vec3 under = backdrop(p, u_frost);
+        bool see = u_style == 1;
         vec4 surf = u_cls[cls].a >= 0.0 ? u_cls[cls]
                   : (light ? vec4(1.0, 1.0, 1.0, cls == 1 ? 0.34 : 0.66) : vec4(1.0, 1.0, 1.0, cls == 1 ? 0.028 : 0.052));
         // Dialogs and menus sit over the page: more solid, and calmer behind.
-        if (over) {
-            under = mix(under, bg_color(), 0.55);
-            if (u_cls[cls].a < 0.0) surf.a = light ? 0.88 : 0.095;
+        if (over && u_cls[cls].a < 0.0) surf.a = light ? 0.88 : 0.095;
+        float pa = 1.0;
+        if (see && u_desktop == 1) {
+            // The window is see-through and Windows blurs the desktop behind
+            // it (its own Acrylic): the panel is only a tint over that.
+            vec3 tint = u_cls[cls].a >= 0.0 ? u_cls[cls].rgb : (light ? vec3(1.0) : vec3(0.20, 0.20, 0.22));
+            float ta = u_cls[cls].a >= 0.0 ? u_cls[cls].a : (light ? (cls == 1 ? 0.22 : 0.50) : (cls == 1 ? 0.10 : 0.34));
+            if (over) ta = max(ta, light ? 0.85 : 0.80);
+            // Over what's already there (the window's own tint).
+            pa = clamp(ta * u_solid, 0.0, 1.0);
+            float a_new = pa + a_under * (1.0 - pa);
+            c = (tint * pa + col * a_under * (1.0 - pa)) / max(a_new, 1e-4);
+            pa = a_new;
+        } else if (see) {
+            // Acrylic: works over any background colour or picture.
+            vec3 tint = u_cls[cls].a >= 0.0 ? u_cls[cls].rgb : (light ? vec3(1.0) : vec3(0.16, 0.16, 0.18));
+            float ta = u_cls[cls].a >= 0.0 ? u_cls[cls].a : (light ? (cls == 1 ? 0.35 : 0.50) : (cls == 1 ? 0.30 : 0.42));
+            if (over) ta = max(ta, light ? 0.72 : 0.62);
+            float keep = clamp(0.38 / max(u_solid, 0.05), 0.0, 1.0);
+            c = acrylic(backdrop(p, max(u_frost, 1.0)), p, light, keep, ta * min(u_solid, 1.6), tint);
+        } else if (cls == 1 && u_cls[cls].a < 0.0) {
+            // The sidebar is part of the window's background: the theme (its
+            // picture, what moves in it) runs under it, with a light tint.
+            c = mix(col, surf.rgb, clamp(surf.a * 1.6, 0.0, 1.0));
+        } else {
+            // Solid: the panel's colour over the plain background, whatever
+            // picture or animation is behind. "Solid" below 100 % lets it through.
+            c = mix(bg_color(), surf.rgb, clamp(surf.a, 0.0, 1.0));
+            if (u_solid < 0.999) c = mix(backdrop(p, u_frost), c, clamp(u_solid, 0.0, 1.0));
         }
-        c = mix(under, surf.rgb, clamp(surf.a, 0.0, 1.0));
         // Hover, emphasis and press only shift the tone a touch.
         float lift = (light ? -0.030 : 0.050) * glow + (light ? -0.040 : 0.035) * press;
         c += lift;
-        c = mix(c, edge.rgb, edge.a * line);
+        float ea = edge.a;
+        if (see && u_edge.a < 0.0) {
+            // Brighter along the top (where the light comes from), fainter below.
+            float top = clamp(((R.y - p.y) / max(R.w, 1.0)) * 0.5 + 0.5, 0.0, 1.0);
+            ea = light ? mix(0.10, 0.06, top) : mix(0.07, 0.20, top);
+            edge.rgb = light ? mix(vec3(0.0), vec3(1.0), top) : vec3(1.0);
+        }
+        c = mix(c, edge.rgb, clamp(ea * u_outline, 0.0, 1.0) * line);
+        if (u_desktop == 1) g_a = mix(a_under, mix(pa, 1.0, clamp(ea * u_outline, 0.0, 1.0) * line), cov * min(s, 1.0));
     } else if (kind == 3) {
         // The volume knob: a plain disc.
         c = light ? vec3(1.0) : vec3(0.94);
         c = mix(c, vec3(0.0), (light ? 0.16 : 0.0) * line);
+        if (u_desktop == 1) g_a = mix(a_under, 1.0, cov);
     } else {
         // Something on a panel (the picked row, a hovered button): a faint tint.
         float a = (light ? 0.060 : 0.085) + (light ? 0.050 : 0.065) * glow + (light ? 0.040 : 0.040) * press;
         c = mix(col, light ? vec3(0.0) : vec3(1.0), a);
+        // On a see-through window it needs a little body to show at all.
+        if (u_desktop == 1) g_a = mix(a_under, max(a_under, light ? 0.30 : 0.16), cov * min(s, 1.0));
     }
     c = progress(c, p, i, d);
     return mix(shadowed, clamp(c, 0.0, 1.0), cov * min(s, 1.0));
@@ -406,9 +485,9 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, int cls, vec3 pre_track, int tr) {
 
     // Shadow: a soft drop shadow plus a tight contact shadow.
     float ds = sdf(p - vec2(0.0, sh * 0.5 * u_ppp), R, rad);
-    float shAmt = (light ? 0.10 : 0.45) * (1.0 + 0.6 * glow);
-    vec3 shadowed = col * (1.0 - s * shAmt * exp(-max(ds, 0.0) / (sh * 2.2 * u_ppp)))
-                        * (1.0 - s * (light ? 0.06 : 0.25) * exp(-max(d, 0.0) / (1.5 * u_ppp)));
+    float shAmt = (light ? 0.10 : 0.45) * (1.0 + 0.6 * glow) * u_shadow;
+    vec3 shadowed = col * (1.0 - min(s * shAmt, 0.95) * exp(-max(ds, 0.0) / (sh * 2.2 * u_ppp)))
+                        * (1.0 - min(s * (light ? 0.06 : 0.25) * u_shadow, 0.95) * exp(-max(d, 0.0) / (1.5 * u_ppp)));
     float cov = clamp(0.5 - d, 0.0, 1.0);
     if (cov <= 0.0) return shadowed;
 
@@ -426,12 +505,14 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, int cls, vec3 pre_track, int tr) {
     vec2 dp = p - u_ptr.xy;
     float near = exp(-dot(dp, dp) / pow(120.0 * u_ppp, 2.0)) * u_ptr.z;
 
-    // What the glass sees.
+    // What the glass sees. Plain glass looks straight through (only
+    // frosted); liquid glass bends it at the rim.
+    float bend = u_style == 2 ? 1.0 : 0.0;
     vec3 under;
-    vec2 disp = -n * bevel * 0.9 * slope;
+    vec2 disp = -n * bevel * 0.9 * slope * bend;
     if (kind == 0) {
         float blur = u_frost;
-        if (u_theme == 2) {
+        if (u_theme == 2 && bend > 0.5) {
             float k = 0.05 * slope;
             under = vec3(backdrop(p + disp * (1.0 + k), blur).r,
                          backdrop(p + disp, blur).g,
@@ -439,6 +520,7 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, int cls, vec3 pre_track, int tr) {
         } else {
             under = backdrop(p + disp, blur);
         }
+        under = acrylic(under, p, light, 0.55, 0.0, vec3(1.0));
     } else if (kind == 3 && tr >= 0) {
         // Magnify the track beneath the lens (1.6x) and bend it at the rim.
         vec2 q = R.xy + (p - R.xy) / 1.6 + disp * 0.6;
@@ -455,7 +537,9 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, int cls, vec3 pre_track, int tr) {
     } else {
         float base = light ? 0.70 : 0.07;
         float clear = light ? 0.10 : 0.015;
-        milk = mix(base, clear, value) + (light ? 0.12 : 0.06) * glow + (light ? 0.10 : 0.07) * press;
+        // Plain glass is a little more frosted.
+        if (bend < 0.5) base += light ? 0.06 : 0.025;
+        milk = mix(base, clear, value) * u_solid + (light ? 0.12 : 0.06) * glow + (light ? 0.10 : 0.07) * press;
     }
 
     // A set panel colour tints the glass instead of plain white.
@@ -465,18 +549,21 @@ vec3 layer(vec3 col, vec2 p, int i, int kind, int cls, vec3 pre_track, int tr) {
         milk = clamp(u_cls[cls].a + (light ? 0.12 : 0.06) * glow + (light ? 0.10 : 0.07) * press, 0.0, 1.0);
     }
     vec3 c = mix(under, tintc, milk);
+    // The rim: liquid glass has the full bevel, plain glass a thin bright edge.
+    float rim = clamp((bend > 0.5 ? 0.95 : 0.75) * u_outline, 0.0, 1.0);
+    float sheen = bend > 0.5 ? 1.0 : 0.35;
     if (light) {
-        c -= slope * (0.09 + 0.05 * glow) * (1.0 - 0.75 * lit);      // refraction ring
-        c += pow(edge, 6.0) * (0.30 * sl + 0.15 * sb);
+        c -= slope * (0.09 + 0.05 * glow) * (1.0 - 0.75 * lit) * bend;      // refraction ring
+        c += pow(edge, 6.0) * (0.30 * sl + 0.15 * sb) * sheen;
         vec3 lc = mix(vec3(0.70, 0.70, 0.74), vec3(1.0), clamp(0.05 + 1.4 * sl + 0.5 * sb + near, 0.0, 1.0));
-        c = mix(c, lc, (1.0 - smoothstep(0.0, 1.2 * u_ppp, inside)) * 0.95);
+        c = mix(c, lc, (1.0 - smoothstep(0.0, 1.2 * u_ppp, inside)) * rim);
     } else {
-        c += slope * 0.06 * (0.25 + lit);
-        c += pow(edge, 6.0) * (0.45 * sl + 0.22 * sb + 0.25 * near);
-        c += exp(-inside / (4.0 * u_ppp)) * (0.03 + 0.12 * sl + 0.06 * sb);
+        c += slope * 0.06 * (0.25 + lit) * bend;
+        c += pow(edge, 6.0) * (0.45 * sl + 0.22 * sb + 0.25 * near) * sheen;
+        c += exp(-inside / (4.0 * u_ppp)) * (0.03 + 0.12 * sl + 0.06 * sb) * (0.4 + 0.6 * bend);
         c += near * 0.035;
         vec3 lc = mix(vec3(0.18), vec3(0.88), clamp(0.08 + 1.2 * sl + 0.7 * sb + near, 0.0, 1.0));
-        c = mix(c, lc, (1.0 - smoothstep(0.0, 1.2 * u_ppp, inside)) * 0.95);
+        c = mix(c, lc, (1.0 - smoothstep(0.0, 1.2 * u_ppp, inside)) * rim);
     }
     c = progress(c, p, i, d);
     return mix(shadowed, clamp(c, 0.0, 1.0), cov * min(s, 1.0));
@@ -499,12 +586,15 @@ void main() {
         float d0 = sdf(p, u_rect[0], radius_of(0));
         float cov0 = clamp(0.5 - d0, 0.0, 1.0);
         float ds = sdf(p - vec2(0.0, 8.0 * u_ppp), u_rect[0], radius_of(0));
-        float sh = (light_ui() ? 0.16 : 0.45) * exp(-max(ds, 0.0) / (16.0 * u_ppp));
+        float sh = min((light_ui() ? 0.16 : 0.45) * u_shadow, 0.9) * exp(-max(ds, 0.0) / (16.0 * u_ppp));
         float a_out = 1.0 - (1.0 - u_dim) * (1.0 - sh);
         col += (hash2(p) - 0.5) / 255.0;
         o = vec4(clamp(col, 0.0, 1.0) * cov0, cov0 + (1.0 - cov0) * a_out);
         return;
     }
+    // See-through window: almost nothing of the background itself (it still
+    // takes the clicks); Windows' blur of the desktop shows instead.
+    if (u_desktop == 1) g_a = light_ui() ? 0.42 : 0.50;
     vec3 pre_track = col;
     int tr = -1;
     for (int i = 0; i < MAX_EL; i++) {
@@ -522,6 +612,10 @@ void main() {
         }
     }
     col += (hash2(p) - 0.5) / 255.0;
+    if (u_desktop == 1) {
+        o = vec4(clamp(col, 0.0, 1.0) * g_a, g_a);
+        return;
+    }
     o = vec4(clamp(col, 0.0, 1.0), 1.0);
 }
 "#;
@@ -632,6 +726,18 @@ pub struct Frame {
     /// Largest panel corner radius and blur behind panels (points).
     pub round: f32,
     pub frost: f32,
+    /// 0 simple, 1 glass, 2 liquid glass.
+    pub style: i32,
+    pub solid: f32,
+    pub outline: f32,
+    pub shadow: f32,
+    pub amount: f32,
+    /// `accent` is every theme's accent.
+    pub accent_on: bool,
+    /// The cover's colours behind the pages.
+    pub bg_album: bool,
+    /// The window is see-through: Windows blurs the desktop behind it.
+    pub desktop: bool,
 }
 
 pub struct GlassRenderer {
@@ -770,6 +876,14 @@ impl GlassRenderer {
             gl.uniform_3_f32(loc("u_accent").as_ref(), f.accent[0], f.accent[1], f.accent[2]);
             gl.uniform_1_i32(loc("u_light_ui").as_ref(), f.light_ui as i32);
             gl.uniform_1_i32(loc("u_flat").as_ref(), f.flat as i32);
+            gl.uniform_1_i32(loc("u_style").as_ref(), f.style);
+            gl.uniform_1_f32(loc("u_solid").as_ref(), f.solid);
+            gl.uniform_1_f32(loc("u_outline").as_ref(), f.outline);
+            gl.uniform_1_f32(loc("u_shadow").as_ref(), f.shadow);
+            gl.uniform_1_f32(loc("u_amount").as_ref(), f.amount);
+            gl.uniform_1_i32(loc("u_accent_on").as_ref(), f.accent_on as i32);
+            gl.uniform_1_i32(loc("u_bg_album").as_ref(), f.bg_album as i32);
+            gl.uniform_1_i32(loc("u_desktop").as_ref(), (f.desktop && !f.overlay) as i32);
             let fills: Vec<f32> = f.fills.iter().flatten().copied().collect();
             gl.uniform_4_f32_slice(loc("u_cls[0]").as_ref(), &fills);
             gl.uniform_4_f32(loc("u_edge").as_ref(), f.edge[0], f.edge[1], f.edge[2], f.edge[3]);

@@ -10,24 +10,31 @@ use crate::icons::Icons;
 use crate::theme::{CustomTheme, Theme};
 use crate::widgets::{field, font, pill, text_trunc};
 
-const NAMES: [&str; 3] = ["Background", "Accent", "Text"];
+const NAMES: [&str; 4] = ["Background", "Accent", "Text", "Accent"];
 
 /// A few ready colours for each of the three.
-const SWATCHES: [[[u8; 3]; 8]; 3] = [
+const SWATCHES: [[[u8; 3]; 8]; 4] = [
     [[22, 20, 34], [12, 12, 14], [34, 18, 40], [14, 30, 26], [30, 22, 18], [18, 28, 46], [236, 228, 214], [228, 233, 242]],
     [[150, 130, 255], [110, 190, 255], [110, 225, 180], [255, 170, 120], [255, 120, 160], [240, 200, 90], [240, 92, 92], [240, 240, 245]],
     [[240, 238, 248], [250, 240, 228], [200, 202, 214], [255, 248, 231], [22, 22, 26], [26, 32, 58], [56, 40, 30], [60, 60, 68]],
+    [[150, 130, 255], [110, 190, 255], [110, 225, 180], [255, 170, 120], [255, 120, 160], [240, 200, 90], [240, 92, 92], [168, 222, 255]],
 ];
 
 /// The open colour picker.
 pub struct ColorPick {
-    /// 0 background, 1 accent, 2 text.
+    /// 0 background, 1 accent, 2 text (the Custom theme); 3 the accent for every theme.
     pub which: usize,
     /// The colour it opened from.
     pub from: Rect,
     pub open_t: f32,
     pub hsv: [f32; 3],
     pub hex: String,
+}
+
+impl ColorPick {
+    pub fn new(which: usize, from: Rect, c: [u8; 3]) -> ColorPick {
+        ColorPick { which, from, open_t: 0.0, hsv: rgb_to_hsv(c), hex: hex_of(c) }
+    }
 }
 
 pub fn hex_of(c: [u8; 3]) -> String {
@@ -174,8 +181,8 @@ impl Starlite {
                 }
                 let _ = std::fs::write(&f, crate::css::TEMPLATE);
             }
-            if std::process::Command::new("notepad.exe").arg(&f).spawn().is_err() {
-                self.toast("Couldn't open Notepad");
+            if !crate::win::edit_text(&f) {
+                self.toast("Couldn't open the file");
             }
         }
         // What the file does, or the first thing in it Starlite can't use.
@@ -349,14 +356,25 @@ impl Starlite {
             match which {
                 0 => self.custom.background = c,
                 1 => self.custom.accent = c,
-                _ => self.custom.text = c,
+                2 => self.custom.text = c,
+                _ => {
+                    // Settings → Appearance → Advanced → Accent.
+                    self.look.accent = c;
+                    self.look.apply();
+                }
             }
-            self.custom_changed(&ctx, false);
+            if which < 3 {
+                self.custom_changed(&ctx, false);
+            }
         }
         let inside = back.interact_pointer_pos().is_some_and(|p| panel.contains(p));
         if (back.clicked() && !inside) || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.color_pick = None;
-            self.custom.save();
+            if which < 3 {
+                self.custom.save();
+            } else {
+                self.look.save();
+            }
         }
     }
 }

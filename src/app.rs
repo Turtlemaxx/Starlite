@@ -27,7 +27,6 @@ use crate::widgets::{field, font, icon_button, pill, playlist_cover, text_trunc}
 use crate::youtube::{RemotePlaylist, YouTube};
 use crate::ytplayer::{YtEvent, YtPlayer};
 
-pub const NAV_FULL: f32 = 232.0;
 pub const NAV_MINI: f32 = 80.0;
 pub const PLAYER_H: f32 = 66.0;
 const TREE_SIZE: [f32; 2] = [540.0, 450.0];
@@ -218,7 +217,7 @@ pub struct Starlite {
     /// The song lined up to follow the current one: (audio serial it follows, its place in the queue, its id).
     pub lined_up: Option<(u64, usize, String)>,
     pub sound_ui: crate::soundpage::SoundUi,
-    /// The service picked in Settings → Services.
+    /// The service picked in Settings â†’ Services.
     pub service_sel: usize,
     /// The welcome window of the first start.
     pub welcome: Option<crate::services::Welcome>,
@@ -238,8 +237,24 @@ pub struct Starlite {
     pub css: crate::css::Css,
     css_stamp: Option<std::time::SystemTime>,
     css_checked: f64,
-    /// The font family in use from the CSS, and whether it was found.
+    /// The font family in use (from the CSS or Advanced), and whether it was found.
     pub css_font: Option<(String, bool)>,
+    /// Looks you saved (looks.json).
+    pub saved_looks: Vec<crate::theme::SavedLook>,
+    /// Naming a look to save it.
+    pub look_name: Option<String>,
+    pub font_menu: Option<crate::appearance::FontMenu>,
+    /// Installed font families (read when the font menu first opens).
+    pub font_list: Option<Vec<String>>,
+    /// How tall the Appearance page was last time (it scrolls).
+    /// How tall each settings page was last frame (for scrolling).
+    pub settings_h: [f32; crate::settings::COUNT],
+    /// Windows' blur behind the window: on, and dark (what was last set).
+    pub backdrop_set: Option<(bool, bool)>,
+    /// Why the picked click sound couldn't be used.
+    pub click_error: Option<String>,
+    /// The moving backgrounds' clock (runs at the Motion speed).
+    bg_clock: f64,
     /// Speed and bass (sound.json).
     pub fx: crate::fx::FxPrefs,
     /// Playlist search: (which playlist, what's typed).
@@ -255,9 +270,12 @@ fn install_fonts(ctx: &egui::Context, family: Option<&str>) -> bool {
     let dir = std::env::var("WINDIR")
         .map(|w| PathBuf::from(w).join("Fonts"))
         .unwrap_or_else(|_| PathBuf::from(r"C:\Windows\Fonts"));
-    let custom = family.and_then(|f| crate::css::pick_fonts(&crate::win::font_table(), f));
+    let table = crate::win::font_table();
+    let custom = family.and_then(|f| crate::css::pick_fonts(&table, f));
     let found = custom.is_some();
-    let files = custom.unwrap_or_else(|| ["segoeui.ttf".into(), "seguisb.ttf".into(), "segoeuib.ttf".into()]);
+    // Windows: Segoe UI. Linux: the first of a few common UI fonts that's there.
+    let system = crate::win::UI_FONTS.iter().find_map(|f| crate::css::pick_fonts(&table, f));
+    let files = custom.or(system).unwrap_or_else(|| ["segoeui.ttf".into(), "seguisb.ttf".into(), "segoeuib.ttf".into()]);
     let base = fonts.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
     for (name, file) in ["regular", "semibold", "bold"].into_iter().zip(files) {
         let mut fam = base.clone();
@@ -388,6 +406,20 @@ fn debug_shots(ctx: &egui::Context) {
     ctx.request_repaint_after(Duration::from_millis(15));
 }
 
+/// An accent from a cover's colours: the most colourful one, made bright
+/// enough for a dark window (or deep enough for a light one).
+fn cover_accent(pal: &[[f32; 3]; 4], light: bool) -> [u8; 3] {
+    let colourful = |c: &[f32; 3]| {
+        let (mx, mn) = (c[0].max(c[1]).max(c[2]), c[0].min(c[1]).min(c[2]));
+        (mx - mn) * (0.3 + mx)
+    };
+    let c = pal.iter().max_by(|a, b| colourful(a).total_cmp(&colourful(b))).copied().unwrap_or([0.6, 0.5, 1.0]);
+    let mx = c[0].max(c[1]).max(c[2]).max(1e-3);
+    let (target, k) = if light { (0.45, 0.0) } else { (0.92, 0.25) };
+    let lift = |v: f32| (((v / mx) * target) * (1.0 - k) + target * k).clamp(0.0, 1.0);
+    [lift(c[0]), lift(c[1]), lift(c[2])].map(|v| (v * 255.0).round() as u8)
+}
+
 fn rgb_f(c: [u8; 3]) -> [f32; 3] {
     [c[0] as f32 / 255.0, c[1] as f32 / 255.0, c[2] as f32 / 255.0]
 }
@@ -433,6 +465,8 @@ impl Starlite {
         let gl = cc.gl.as_ref().expect("Starlite needs the glow renderer");
         let hwnd = cc.window_handle().ok().and_then(|h| match h.as_raw() {
             RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+            RawWindowHandle::Xlib(w) => Some(w.window as isize),
+            RawWindowHandle::Xcb(w) => Some(w.window.get() as isize),
             _ => None,
         });
         egui_extras::install_image_loaders(&cc.egui_ctx);
@@ -471,7 +505,7 @@ impl Starlite {
             jf: Arc::new(crate::jellyfin::Jellyfin::load()),
             jfst: NdState::default(),
             stream: crate::stream::StreamPrefs::load(),
-            // Debug: STARLITE_SETTINGS_TAB=0..6 opens that Settings tab.
+            // Debug: STARLITE_SETTINGS_TAB=0..11 opens that Settings page.
             settings_tab: std::env::var("STARLITE_SETTINGS_TAB").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             discord: crate::discord::Discord::start(),
             dc_id_input: crate::discord::DiscordPrefs::load().app_id,
@@ -515,8 +549,7 @@ impl Starlite {
             play_serial: 0,
             lined_up: None,
             sound_ui: Default::default(),
-            // Debug: STARLITE_SERVICE=0..4 picks that service in Settings.
-            service_sel: std::env::var("STARLITE_SERVICE").ok().and_then(|v| v.parse().ok()).filter(|&i| i < 5).unwrap_or(0),
+            service_sel: 0,
             welcome: None,
             updater: crate::updater::Updater::start(&cc.egui_ctx),
             lastfm: crate::lastfm::LastFm::start(),
@@ -530,6 +563,14 @@ impl Starlite {
             css_stamp: None,
             css_checked: -10.0,
             css_font: None,
+            saved_looks: crate::theme::load_looks(),
+            look_name: None,
+            font_menu: None,
+            font_list: None,
+            settings_h: [900.0; crate::settings::COUNT],
+            backdrop_set: None,
+            click_error: None,
+            bg_clock: 0.0,
             fx: crate::fx::FxPrefs::load(),
             pl_search: (String::new(), String::new()),
             toast: None,
@@ -568,6 +609,18 @@ impl Starlite {
         app.audio.set_speed(app.fx.speed);
         app.audio.set_fx(&app.fx);
         app.welcome = crate::services::first_start(!app.connected_servers().is_empty());
+        let (click, file) = (app.look.click, app.look.click_file.clone());
+        if app.sound.set_click(click, file.as_deref()).is_err() {
+            // The file went missing: the classic click.
+            let _ = app.sound.set_click(crate::sound::ClickSound::Classic, None);
+        }
+        // Debug: STARLITE_LOOK_SAVE=<name> saves the current look; STARLITE_LOOK=<name> switches to a saved one.
+        if let Ok(n) = std::env::var("STARLITE_LOOK_SAVE") {
+            app.save_current_look(&n);
+        }
+        if let Some(l) = std::env::var("STARLITE_LOOK").ok().and_then(|n| app.saved_looks.iter().find(|l| l.name == n).cloned()) {
+            app.apply_saved_look(&cc.egui_ctx, &l);
+        }
         // Just started by the updater.
         if std::env::var("STARLITE_UPDATED").is_ok() {
             app.toast(concat!("Updated to Starlite ", env!("CARGO_PKG_VERSION")));
@@ -603,7 +656,7 @@ impl Starlite {
         }
     }
 
-    // ── Background jobs ────────────────────────────────────────────
+    // â”€â”€ Background jobs â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     pub fn load_explore(&mut self, ctx: &egui::Context) {
         if self.explore.loading {
@@ -665,14 +718,26 @@ impl Starlite {
         }
         self.css_stamp = stamp;
         self.css = std::fs::read_to_string(Self::css_file()).map(|t| crate::css::parse(&t)).unwrap_or_default();
-        // A font it names (back to Segoe UI when it names none).
-        let family = self.css.font.clone();
-        if family != self.css_font.as_ref().map(|f| f.0.clone()) {
-            let found = install_fonts(ctx, family.as_deref());
-            self.css_font = family.map(|f| (f, found));
-        }
+        self.refresh_fonts(ctx);
         self.custom_changed(ctx, false);
         ctx.request_repaint();
+    }
+
+    /// Read theme.css again on the next frame.
+    pub fn reload_css(&mut self) {
+        self.css_stamp = None;
+        self.css_checked = -10.0;
+        self.css = std::fs::read_to_string(Self::css_file()).map(|t| crate::css::parse(&t)).unwrap_or_default();
+    }
+
+    /// Loads the font in use: the Custom theme's CSS names one, else
+    /// Advanced â†’ Font, else Segoe UI.
+    pub fn refresh_fonts(&mut self, ctx: &egui::Context) {
+        let want = if self.theme == Theme::Custom { self.css.font.clone() } else { None }.or_else(|| self.look.font.clone());
+        if want != self.css_font.as_ref().map(|f| f.0.clone()) {
+            let found = install_fonts(ctx, want.as_deref());
+            self.css_font = want.map(|f| (f, found));
+        }
     }
 
     /// The page state of a server.
@@ -890,7 +955,7 @@ impl Starlite {
         }
     }
 
-    // ── Playback ───────────────────────────────────────────────────
+    // â”€â”€ Playback â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     pub fn play_list(&mut self, list: Vec<Track>, i: usize) {
         if i >= list.len() {
@@ -1025,7 +1090,7 @@ impl Starlite {
 
     /// A dropdown or dialog is open: the page under it must not react.
     pub fn overlay_open(&self) -> bool {
-        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some() || self.updater.open || self.welcome.is_some()
+        self.fx_pop.is_some() || self.popover.is_some() || self.dialog.is_some() || self.nd_menu.is_some() || self.color_pick.is_some() || self.updater.open || self.welcome.is_some() || self.font_menu.is_some()
     }
 
     pub fn now_is_youtube(&self) -> bool {
@@ -1045,7 +1110,7 @@ impl Starlite {
             return;
         }
         self.yt_busy = true;
-        self.yt_status = Some((true, "Finish signing in in your browser…".into()));
+        self.yt_status = Some((true, "Finish signing in in your browserâ€¦".into()));
         let (yt, tx, ctx) = (self.yt.clone(), self.jobs_tx.clone(), ctx.clone());
         std::thread::spawn(move || {
             let c2 = ctx.clone();
@@ -1142,7 +1207,7 @@ impl Starlite {
         self.dialog = Some(Dialog { name: String::new(), cover: Cover::Preset("disc-3".into()), error: None, open_t: 0.0, add_after, import: None, under: None });
     }
 
-    // ── Navigation ─────────────────────────────────────────────────
+    // â”€â”€ Navigation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn nav_layout(&self, w: f32, h: f32, t: f32) -> NavLayout {
         use crate::nav::NavItem;
@@ -1287,7 +1352,7 @@ impl Starlite {
             let cy = rect.center().y;
             if !editing {
                 if label_a > 0.0 {
-                    text_trunc(&pp, rect.left_center(), Align2::LEFT_CENTER, &name.to_uppercase(), font(11.0, "semibold"), theme.text_dim().gamma_multiply(label_a), rect.width() - 36.0);
+                    text_trunc(&pp, rect.left_center(), Align2::LEFT_CENTER, &name, font(12.5, "semibold"), theme.text_dim().gamma_multiply(label_a), rect.width() - 36.0);
                 }
                 // Collapsed, only the first category keeps its + (the others are a short line).
                 if label_a > 0.5 || Some(*idx) == first_header {
@@ -1321,7 +1386,7 @@ impl Starlite {
                 renamed = Some((*idx, text, resp.lost_focus()));
             } else {
                 let resp = ui.interact(Rect::from_min_max(hit.min, pos2(nav_w - 46.0, hit.bottom())), ui.id().with(("nav_hdr", *idx)), Sense::click_and_drag()).on_hover_cursor(CursorIcon::Grab);
-                text_trunc(&pp, rect.left_center(), Align2::LEFT_CENTER, &name.to_uppercase(), font(11.0, "semibold"), if resp.hovered() || dragging == Some(*idx) { theme.text() } else { theme.text_dim() }, rect.width() - 36.0);
+                text_trunc(&pp, rect.left_center(), Align2::LEFT_CENTER, &name, font(12.5, "semibold"), if resp.hovered() || dragging == Some(*idx) { theme.text() } else { theme.text_dim() }, rect.width() - 36.0);
                 if resp.drag_started() {
                     drag_start = Some(*idx);
                 } else if resp.clicked() {
@@ -1341,7 +1406,9 @@ impl Starlite {
         p.line_segment([pos2(inset, lay.divider_y), pos2(nav_w - inset, lay.divider_y)], Stroke::new(1.0_f32, theme.hairline().gamma_multiply(0.8)));
 
         let selected = self.key_for_view();
-        let mut hover_el = None;
+        // Every row still fading in or out keeps its highlight (with only one,
+        // moving between rows made the other one vanish: a blink).
+        let mut hover_els: Vec<El> = Vec::new();
         let mut sel_press = 0.0;
         let mut clicked: Option<NavKey> = None;
         let mut right_clicked: Option<(Server, RemotePlaylist, Pos2)> = None;
@@ -1377,9 +1444,7 @@ impl Starlite {
                 if in_list {
                     r = r.intersect(lay.list_clip);
                 }
-                if held || hover_el.is_none() {
-                    hover_el = Some(El::rect(r, ppp, 12.0, h, 3.0, Kind::Layered, 0.4 * h, pr));
-                }
+                hover_els.push(El::rect(r, ppp, 12.0, h, 3.0, Kind::Layered, 0.4 * h, pr));
             }
             if movable && resp.drag_started() {
                 drag_start = idx;
@@ -1418,6 +1483,10 @@ impl Starlite {
                 NavKey::Settings => Some("settings"),
                 NavKey::Liked => Some(if is_sel { "heart-fill" } else { "heart" }),
                 NavKey::Downloaded => Some("download"),
+                NavKey::Playlist(_) | NavKey::NdLink(..) if !self.look.nav_covers => Some(match key {
+                    NavKey::NdLink(srv, _) => srv.icon(),
+                    _ => "disc-3",
+                }),
                 NavKey::Playlist(pid) => {
                     if let Some(pl) = self.lib.playlists.iter().find(|p| &p.id == pid) {
                         let c = Rect::from_center_size(lead_c, Vec2::splat(lerp(34.0, 26.0, t)));
@@ -1455,9 +1524,7 @@ impl Starlite {
                 }
             }
         }
-        if let Some(h) = hover_el {
-            els.push(h);
-        }
+        els.extend(hover_els);
 
         // Selection pill glides between rows on a spring, stretching like gel.
         let target = sel_target.map(|s| s.0);
@@ -1537,7 +1604,7 @@ impl Starlite {
             }
         }
 
-        // ── Edits ──
+        // â”€â”€ Edits â”€â”€
         if let Some(e) = self.nav_edit.as_mut() {
             let mut changed = false;
             if let Some(i) = drag_start {
@@ -1673,18 +1740,22 @@ impl Starlite {
         }
     }
 
-    // ── Overlays ───────────────────────────────────────────────────
+    // â”€â”€ Overlays â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     pub fn base_frame(&self, full: Rect, ppp: f32, time: f32, nav_w: f32) -> Frame {
         // The Custom theme as drawn: its colours with the CSS on top.
         let custom = crate::theme::CustomTheme::get();
         let css = (self.theme == Theme::Custom).then_some(&self.css);
-        let flat = !self.look.liquid_glass;
+        let flat = self.look.style != crate::theme::Style::Liquid;
+        let lk = &self.look;
+        let accent_on = lk.accent_from != crate::theme::AccentFrom::Theme;
+        let accent = if accent_on { let a = crate::theme::Theme::Dark.accent(); [a.r() as f32 / 255.0, a.g() as f32 / 255.0, a.b() as f32 / 255.0] } else { rgb_f(custom.accent) };
         let unset = [0.0, 0.0, 0.0, -1.0];
         Frame {
             res: [full.width() * ppp, full.height() * ppp],
             ppp,
-            time,
+            // Moving backgrounds run on their own clock (Advanced â†’ Motion speed).
+            time: { let _ = time; self.bg_clock as f32 },
             theme: self.theme.shader_id(),
             els: [El::default(); MAX_EL],
             count: 0,
@@ -1696,15 +1767,35 @@ impl Starlite {
             fs: smooth(self.fs_t),
             palette: self.palette,
             custom_bg: rgb_f(custom.background),
-            accent: rgb_f(custom.accent),
+            accent,
             light_ui: custom.is_light(),
             flat,
             fills: [css.and_then(|c| c.panel).unwrap_or(unset), css.and_then(|c| c.sidebar).unwrap_or(unset), css.and_then(|c| c.player).unwrap_or(unset)],
             edge: css.and_then(|c| c.border).unwrap_or(unset),
-            // The simple look has calmer corners; liquid glass keeps its own.
-            round: css.and_then(|c| c.radius).unwrap_or(if flat { 14.0 } else { 1000.0 }),
-            frost: css.and_then(|c| c.blur).unwrap_or(16.0),
+            // The simple look has calmer corners; glass keeps its own.
+            round: css.and_then(|c| c.radius).or(lk.round).unwrap_or(if flat { 14.0 } else { 1000.0 }),
+            frost: css.and_then(|c| c.blur).or(lk.blur).unwrap_or(16.0),
+            style: lk.style.shader_id(),
+            solid: lk.solid.unwrap_or(1.0),
+            outline: lk.outline.unwrap_or(1.0),
+            shadow: lk.shadow.unwrap_or(1.0),
+            amount: lk.motion_amount,
+            accent_on,
+            bg_album: lk.backdrop == crate::theme::Backdrop::Album,
+            desktop: false,
         }
+    }
+
+    /// Glass on a plain theme (Light, Dark, Custom without a picture): nothing
+    /// in the window to see through, so the window itself is see-through and
+    /// Windows blurs the desktop behind it, like its own apps.
+    pub fn desktop_glass(&self) -> bool {
+        let plain = match self.theme {
+            Theme::Light | Theme::Dark => true,
+            Theme::Custom => self.custom.image.is_none(),
+            _ => false,
+        };
+        cfg!(windows) && plain && self.look.style == crate::theme::Style::Glass && self.look.backdrop == crate::theme::Backdrop::Theme && self.fs_t <= 0.0 && std::env::var("STARLITE_NODESKTOP").is_err()
     }
 
     pub fn set_frame(&self, ui: &egui::Ui, slot: egui::layers::ShapeIdx, full: Rect, mut frame: Frame, els: &[El]) {
@@ -1716,11 +1807,30 @@ impl Starlite {
             *d = *s;
         }
         let r = self.renderer.clone();
+        // The main window's frame starts right after the compositor has shown
+        // the last one (below).
+        let sync = !frame.overlay && ui.ctx().viewport_id() == egui::ViewportId::ROOT && std::env::var("STARLITE_NOSYNC").is_err();
         ui.painter().set(
             slot,
             egui::PaintCallback {
                 rect: full,
-                callback: Arc::new(egui_glow::CallbackFn::new(move |_info, painter| {
+                callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
+                    if std::env::var("STARLITE_TIMING").is_ok() {
+                        let s = info.screen_size_px;
+                        let (w, h) = (frame.res[0].round() as u32, frame.res[1].round() as u32);
+                        if s[0] != w || s[1] != h || (info.pixels_per_point - frame.ppp).abs() > 1e-3 {
+                            eprintln!("SIZE MISMATCH paint {}x{} @{} vs frame {}x{} @{}", s[0], s[1], info.pixels_per_point, w, h, frame.ppp);
+                        }
+                    }
+                    if sync {
+                        // With NVIDIA's OpenGL on Windows 11, a frame drawn while the
+                        // compositor was picking up the window (it does when the
+                        // window gains focus or the mouse comes in) could show half
+                        // drawn: the background with nothing on it, for one frame.
+                        // That was the flicker. Starting right after the compositor's
+                        // pass gives the whole frame time to finish first.
+                        crate::win::wait_for_refresh();
+                    }
                     r.lock().unwrap().paint(painter.gl(), &frame);
                 })),
             },
@@ -1778,7 +1888,7 @@ impl Starlite {
         } else if let Some((n, missing)) = import {
             let mut s = format!("{n} song{} from the .m3u", if n == 1 { "" } else { "s" });
             if missing > 0 {
-                s += &format!(" · {missing} not found");
+                s += &format!(" Â· {missing} not found");
             }
             text_trunc(&p, pos2(name_rect.left(), name_rect.bottom() + 14.0), Align2::LEFT_CENTER, &s, font(12.0, "semibold"), dim, name_rect.width());
         }
@@ -1789,7 +1899,7 @@ impl Starlite {
         let (tile, gap, cols) = (44.0, 8.0, 8);
         let mut picked: Option<Cover> = None;
         let mut choose_file = false;
-        let mut hover_tile = None;
+        let mut hover_tiles: Vec<El> = Vec::new();
         for i in 0..=PRESETS.len() {
             let (cxi, cyi) = (i % cols, i / cols);
             let r = Rect::from_min_size(pos2(x0 + cxi as f32 * (tile + gap), grid_top + 16.0 + cyi as f32 * (tile + gap)), Vec2::splat(tile));
@@ -1804,7 +1914,7 @@ impl Starlite {
             if sel {
                 els.push(El::rect(r, ppp, 13.0, 1.0, 3.0, Kind::Layered, 0.5, 0.0));
             } else if h > 0.001 {
-                hover_tile = Some(El::rect(Rect::from_center_size(r.center(), r.size() * (0.9 + 0.1 * h)), ppp, 13.0, h, 2.0, Kind::Layered, 0.3, 0.0));
+                hover_tiles.push(El::rect(Rect::from_center_size(r.center(), r.size() * (0.9 + 0.1 * h)), ppp, 13.0, h, 2.0, Kind::Layered, 0.3, 0.0));
             }
             icons.paint(ui, icon, r.center(), 20.0, if sel { theme.accent().gamma_multiply(ot) } else { fg });
             let resp = if i == PRESETS.len() { resp.on_hover_text("Choose your own image (PNG or JPG)") } else { resp };
@@ -1816,9 +1926,7 @@ impl Starlite {
                 }
             }
         }
-        if let Some(h) = hover_tile {
-            els.push(h);
-        }
+        els.extend(hover_tiles);
 
         // Buttons.
         let by = panel.bottom() - 28.0 - 40.0;
@@ -1930,14 +2038,14 @@ impl Starlite {
 
         let mut chosen: Option<(String, String)> = None;
         let mut new_pl = false;
-        let mut hover_row = None;
+        let mut hover_rows: Vec<El> = Vec::new();
         for i in 0..rows {
             let r = Rect::from_min_size(pos2(panel.left() + 8.0, panel.top() + 40.0 + i as f32 * row_h), vec2(w - 16.0, row_h - 4.0));
             let id = ui.id().with(("pop", i));
             let resp = ui.interact(r, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
             let hv = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered(), 0.12);
             if hv > 0.001 {
-                hover_row = Some(El::rect(r, ppp, 11.0, hv, 2.0, Kind::Layered, 0.3, 0.0));
+                hover_rows.push(El::rect(r, ppp, 11.0, hv, 2.0, Kind::Layered, 0.3, 0.0));
             }
             let c = Rect::from_center_size(pos2(r.left() + 20.0, r.center().y), Vec2::splat(26.0));
             if let Some((id_s, name, cover)) = lists.get(i) {
@@ -1948,15 +2056,13 @@ impl Starlite {
                 }
             } else {
                 icons.paint(ui, "plus", c.center(), 17.0, fg);
-                p.text(pos2(r.left() + 42.0, r.center().y), Align2::LEFT_CENTER, "New playlist…", font(13.5, "semibold"), fg);
+                p.text(pos2(r.left() + 42.0, r.center().y), Align2::LEFT_CENTER, "New playlistâ€¦", font(13.5, "semibold"), fg);
                 if resp.clicked() {
                     new_pl = true;
                 }
             }
         }
-        if let Some(hr) = hover_row {
-            els.push(hr);
-        }
+        els.extend(hover_rows);
         let mut frame = self.base_frame(full, ppp, time, nav_w);
         frame.overlay = true;
         self.set_frame(ui, slot, full, frame, &els);
@@ -2098,7 +2204,7 @@ impl eframe::App for Starlite {
         if std::env::var("STARLITE_TIMING").is_ok() {
             let dt_ms = ctx.input(|i| i.unstable_dt) * 1000.0;
             let cpu_ms = frame_info.info().cpu_usage.unwrap_or(0.0) * 1000.0;
-            eprintln!("frame dt={dt_ms:.1}ms app+paint={cpu_ms:.2}ms causes={:?}", ctx.repaint_causes());
+            eprintln!("frame dt={dt_ms:.1}ms app+paint={cpu_ms:.2}ms size={:?} causes={:?}", ctx.screen_rect().size(), ctx.repaint_causes());
         }
         debug_shots(ctx);
         let dt = ctx.input(|i| i.stable_dt).clamp(1.0 / 240.0, 1.0 / 20.0);
@@ -2113,6 +2219,14 @@ impl eframe::App for Starlite {
 
         self.poll_jobs(ctx);
         self.updater.tick(ctx);
+        self.bg_clock += dt as f64 * self.look.motion_speed as f64;
+        // Advanced â†’ Accent â†’ From the cover: the most colourful of its colours.
+        if self.look.accent_from == crate::theme::AccentFrom::Album {
+            crate::theme::set_accent(Some(cover_accent(&self.palette, self.theme.is_light())));
+        }
+        if self.theme != Theme::Custom || self.look.font.is_some() {
+            self.refresh_fonts(ctx);
+        }
 
         // The engine moved on to the lined-up song by itself (gapless / crossfade).
         let (advanced, on) = self.audio.advanced();
@@ -2131,7 +2245,7 @@ impl eframe::App for Starlite {
             }
         }
         self.line_up_next();
-        // Playback events: song ended → next; errors → toast.
+        // Playback events: song ended â†’ next; errors â†’ toast.
         let finished = self.audio.finished();
         if finished != self.last_finished {
             self.last_finished = finished;
@@ -2211,7 +2325,7 @@ impl eframe::App for Starlite {
         } else {
             animating = true;
         }
-        let nav_w = lerp(NAV_MINI, NAV_FULL, smooth(self.nav_t));
+        let nav_w = lerp(NAV_MINI, self.look.nav_width, smooth(self.nav_t));
 
         // The custom theme's picture, read off the UI thread.
         if theme == Theme::Custom {
@@ -2308,6 +2422,7 @@ impl eframe::App for Starlite {
                 dur,
                 fullscreen: self.fullscreen,
                 fx_on: !self.fx.is_default(),
+                hidden: &self.look.bar_hidden,
             };
             let po = self.player.ui(ui, &mut icons, bar, ppp, dt, theme, &mut els, now);
             // Debug: STARLITE_FX_OPEN=1 opens the speed / bass dropdown once.
@@ -2339,6 +2454,7 @@ impl eframe::App for Starlite {
             let ptr = pointer.unwrap_or(pos2(-1e4, -1e4));
             let mut frame = self.base_frame(full, ppp, time, nav_w);
             frame.pointer = [ptr.x * ppp, ptr.y * ppp, self.ptr_glow];
+            frame.desktop = self.desktop_glass();
             self.set_frame(ui, slot, full, frame, &els);
 
             // Overlays draw last, over the finished UI.
@@ -2357,12 +2473,54 @@ impl eframe::App for Starlite {
             if self.color_pick.is_some() {
                 self.draw_color_pick(ui, ppp, dt, full, time, nav_w, &mut animating);
             }
+            if self.font_menu.is_some() {
+                self.draw_font_menu(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
+            }
             if self.welcome.is_some() {
                 self.draw_welcome(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
             } else if self.updater.open {
                 self.draw_update(ui, &mut icons, ppp, dt, full, time, nav_w, &mut animating);
             }
         });
+
+        // Debug: STARLITE_BLANKCHECK=1 looks at the logo after everything is
+        // drawn and says when it's missing (a frame with only the background).
+        if std::env::var("STARLITE_BLANKCHECK").is_ok() {
+            let at = [(44.0 * ppp) as i32, ((full.height() - 52.0) * ppp) as i32];
+            ctx.layer_painter(egui::LayerId::debug()).add(egui::PaintCallback {
+                rect: full,
+                callback: Arc::new(egui_glow::CallbackFn::new(move |info, painter| {
+                    use glow::HasContext;
+                    let gl = painter.gl();
+                    let mut px = [0u8; 4];
+                    unsafe {
+                        gl.read_pixels(at[0], at[1], 1, 1, glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelPackData::Slice(Some(&mut px)));
+                    }
+                    let lum = (px[0] as u32 + px[1] as u32 + px[2] as u32) / 3;
+                    if lum < 120 {
+                        eprintln!(
+                            "BLANK FRAME logo={px:?} font_tex={} size={:?} ppp={} clip={:?}",
+                            painter.texture(egui::TextureId::Managed(0)).is_some(),
+                            info.screen_size_px,
+                            info.pixels_per_point,
+                            info.clip_rect
+                        );
+                    }
+                })),
+            });
+        }
+
+        // Windows' blur behind the window, for glass on a plain theme.
+        let want = (self.desktop_glass(), !self.theme.is_light());
+        if let Some(h) = self.hwnd {
+            if self.backdrop_set != Some(want) {
+                crate::win::set_backdrop(h, want.0, want.1);
+                self.backdrop_set = Some(want);
+            } else if want.0 {
+                // The window's style can be put back (maximising, say).
+                crate::win::keep_own_buttons(h, true);
+            }
+        }
 
         // Player actions.
         if let Some((po, track)) = player_out {
@@ -2376,6 +2534,20 @@ impl eframe::App for Starlite {
         // and a song is loaded. Starlite's own windows (its YouTube player,
         // file dialogs) still count as "in"; the card itself doesn't.
         let minimized = ctx.input(|i| i.viewport().minimized.unwrap_or(false));
+        // Linux: what Windows would tell (focus, the monitor's size).
+        let (focused, monitor, nppp) = ctx.input(|i| (i.viewport().focused.unwrap_or(true), i.viewport().monitor_size, i.viewport().native_pixels_per_point.unwrap_or(1.0)));
+        crate::win::note_focus(focused);
+        if let Some(m) = monitor {
+            crate::win::note_monitor(m.x * nppp, m.y * nppp);
+        }
+        // Linux: the YouTube player is a GTK widget; GTK needs its turn.
+        #[cfg(target_os = "linux")]
+        if self.ytp.is_some() {
+            while gtk::events_pending() {
+                gtk::main_iteration_do(false);
+            }
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
         let away = minimized || !crate::win::app_in_front(self.mini_hwnd());
         let playing = matches!(self.playback_status(), Status::Playing | Status::Loading);
         let has_track = self.now.is_some();
@@ -2400,8 +2572,12 @@ impl eframe::App for Starlite {
             resize_handles(ctx, full);
         }
         self.icons = icons;
+        // Next frame for running animations. Not request_repaint(): egui
+        // paints a zero-delay request twice, two frames a few ms apart, and
+        // that uneven pacing showed as flicker. A request a moment ahead is
+        // painted once, on the next refresh.
         if animating {
-            ctx.request_repaint();
+            ctx.request_repaint_after(Duration::from_micros(1));
         }
         let interval = if self.theme.animated() || self.fs_t > 0.0 {
             33

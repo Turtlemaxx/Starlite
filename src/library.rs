@@ -113,10 +113,17 @@ pub fn data_dir() -> PathBuf {
     if let Ok(d) = std::env::var("STARLITE_DATA_DIR") {
         return PathBuf::from(d);
     }
-    std::env::var("APPDATA")
+    #[cfg(windows)]
+    let base = std::env::var("APPDATA").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("."));
+    // Linux: $XDG_DATA_HOME, or ~/.local/share.
+    #[cfg(not(windows))]
+    let base = std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|d| !d.is_empty())
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("Starlite")
+        .or_else(|| std::env::var("HOME").ok().map(|h| PathBuf::from(h).join(".local").join("share")))
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("Starlite")
 }
 
 /// The app used to be called LiteStar: copy its data (library, theme,
@@ -160,6 +167,11 @@ pub fn migrate_old_data() {
 pub fn downloads_dir() -> PathBuf {
     if let Ok(d) = std::env::var("STARLITE_DOWNLOADS_DIR") {
         return PathBuf::from(d);
+    }
+    // Linux: the program lives somewhere read-only, so in ~/Music.
+    #[cfg(not(windows))]
+    if let Ok(h) = std::env::var("HOME") {
+        return PathBuf::from(h).join("Music").join("Starlite");
     }
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("Downloaded songs")
 }

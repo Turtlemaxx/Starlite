@@ -214,15 +214,6 @@ fn video_track(id: &str, sn: &Value, duration: Option<&str>) -> Track {
     }
 }
 
-/// The user's region (e.g. "DE") from the Windows locale, for local charts.
-fn windows_region() -> String {
-    use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
-    let mut buf = [0u16; 85];
-    let n = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
-    let name = String::from_utf16_lossy(&buf[..(n.max(1) as usize - 1)]);
-    name.rsplit('-').next().filter(|r| r.len() == 2 && r.chars().all(|c| c.is_ascii_uppercase())).unwrap_or("US").to_string()
-}
-
 impl YouTube {
     pub fn new() -> YouTube {
         let saved = std::fs::read_to_string(saved_file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -233,7 +224,7 @@ impl YouTube {
                 .user_agent("Starlite/0.1")
                 .build(),
             saved: Mutex::new(saved),
-            region: std::env::var("STARLITE_REGION").unwrap_or_else(|_| windows_region()),
+            region: std::env::var("STARLITE_REGION").unwrap_or_else(|_| crate::win::region()),
             cancel_sign_in: AtomicBool::new(false),
         }
     }

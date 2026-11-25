@@ -108,13 +108,13 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   the scrolling and the pinned part), click a category to rename it, x
   removes it, "Add category" makes one. The + on a category starts a
   playlist under it. Settings itself can't be moved.
-- **Services** (Settings → Services, `src/services.rs`): one menu for
-  Navidrome, Jellyfin, YouTube, Discord and Last.fm, each with its
-  settings beside it. Servers are signed in to here; the sidebar only
-  shows the ones that are connected, and a server's page sends you back
-  here when it isn't. On the very first start (nothing saved yet, marker
-  file `welcomed`) a welcome window offers to connect Navidrome, Jellyfin
-  or both at once.
+- **Services** (`src/services.rs`): Navidrome, Jellyfin, YouTube, Discord
+  and Last.fm each have their own page in Settings (a green dot in the
+  list: set up). Servers are signed in to there; the sidebar only shows
+  the ones that are connected, and a server's page sends you back there
+  when it isn't. On the very first start (nothing saved yet, marker file
+  `welcomed`) a welcome window offers to connect Navidrome, Jellyfin or
+  both at once.
 - **Update notice** (`src/updater.rs`, `updates.json`): on start and every
   six hours Starlite asks GitHub for its latest release. A newer one opens
   a window with Install: the zip is downloaded (only from this repo's
@@ -122,11 +122,52 @@ folder (`%APPDATA%\LiteStar`: library, theme, logins, covers) to
   unpacked with Windows' tar, the running exe is renamed to
   `Starlite.old.exe`, the new one put in its place and started. Every
   release's notes therefore need their `SHA-256:` line. Switched off under
-  Settings → Appearance → Update notifications; then nothing is asked.
-- **Liquid glass** (Settings → Appearance, off by default, `look.json`): off
-  is the simple look: flat, slightly see-through panels with a hairline and
-  a small shadow, calmer corners and ordinary app greys. Panels still blur
-  what's behind them. On is the bending, reflecting glass.
+  Settings → General; then nothing is asked.
+- **Frame pacing and the flicker:** each frame of the main window starts
+  just after the screen's refresh (`win::wait_for_refresh`, from the
+  compositor's timing; vsync is off since this paces it). Without that,
+  NVIDIA's OpenGL on Windows 11 sometimes showed a frame before it was
+  drawn: the background with nothing on it, for one frame, when the window
+  gained focus or the mouse came in. Measured with screen recordings: about
+  one in 35-65 focus changes before, none in about 700 after.
+- **Settings** (`src/settings.rs`): the categories in a list on the left
+  (Appearance, Layout, Mini player; Sound: Playback, Equalizer, Effects;
+  Services: one page each; General), the picked one on the right. Settings
+  sit in groups of rows (`Group`): the name on the left, its control on the
+  right (switch, choices, slider, button), a thin line between rows, the
+  group on one panel. Pages that can be taller than the window scroll;
+  glass elements in them are cut to the visible area.
+- **Appearance** (`src/appearance.rs`, `look.json`): theme (each card is a
+  small picture of the theme), saved looks, panels (style: Simple, flat and
+  solid panels, the default (the sidebar is part of the background, so a
+  theme's picture or animation runs under it); Glass, the same panels
+  see-through with what's behind blurred, like Windows' Acrylic: more
+  saturation, then the brightness pulled towards a fixed level so text
+  reads on any background. On a plain theme (Light, Dark, Custom without a
+  picture) there's nothing in the window to see, so the window itself turns
+  see-through and Windows blurs the desktop behind it (`DWMSBT_TRANSIENTWINDOW`,
+  frame extended over the window, the system-menu style dropped so Windows
+  doesn't draw its own caption buttons; the window is created transparent
+  and the shader writes alpha only in this mode); Liquid glass, which bends
+  and reflects at the rim; and corners, opacity,
+  blur, edges, shadows), colour (accent: theme's own, from the playing
+  cover, or picked; background: theme's own or the cover's colours), text
+  and icons (a font from Windows' font list, text size, icon line width)
+  and, for the themes that move, their speed and amount. Untouched values
+  follow the style (`None` in look.json). "Reset to defaults" in the
+  corner.
+- **Layout:** song row size, song numbers, album name (its own column when
+  there's room), sidebar width and covers, which player bar buttons show,
+  the CD shelf. **Mini player:** on / off, only while playing, always show
+  the controls, cover colours, Edit (position, size, buttons).
+- **General:** the click sound (Classic, Soft, your own .wav / .mp3 / .ogg,
+  copied into `sounds`, first two seconds, levelled; or off), the version
+  and Check for updates, update notifications, the data folder, release
+  notes.
+- **Saved looks** (`looks.json`): theme, Custom colours and picture (its own
+  copy in `backgrounds`), the theme's CSS, style and the look values, under
+  a name. Switching to one restores all of it; a theme.css the look didn't
+  have is kept as `theme.backup.css`.
 - **Playlist search:** a search field in every playlist's header filters by
   song, artist or album (every word must match), in the list and on the CD
   shelf. Ctrl+F focuses it, Esc clears it. Playing a found song plays the
@@ -207,6 +248,10 @@ atomics. Shelf previews have their own output and skip all of this.
 
 ## How the panels are drawn
 
+At most `MAX_EL` (48) elements are drawn per frame; anything past that was
+dropped for the frame and blinked, so keep pages well under it. Hover
+highlights that fade in and out are each their own element.
+
 One GLSL shader (`src/glass.rs`) draws the theme background and up to 24
 elements: nav bar, pills, bubbles, player bar, buttons, and the volume knob,
 either as flat panels (the default) or as liquid glass. A second pass draws
@@ -229,13 +274,15 @@ they stay sharp at any size and mid-animation.
 | `src/fx.rs` | sound settings: speed, crossfade, equalizer, effects (`sound.json`) |
 | `src/dsp.rs` | the equalizer and the effects |
 | `src/engine.rs` | the mixer: gapless, crossfade, then `dsp` |
-| `src/soundpage.rs` | Settings tabs Playback, Equalizer, Effects |
+| `src/settings.rs` | the Settings page: category list, grouped rows, Layout, Mini player, General |
+| `src/soundpage.rs` | Settings → Playback, Equalizer, Effects |
 | `src/stream.rs` | how server songs are asked for (as stored / converted) |
 | `src/jellyfin.rs` | Jellyfin API client |
 | `src/lastfm.rs` | Last.fm scrobbling and its Settings tab |
 | `src/updater.rs` | update notice and install |
 | `src/nav.rs` | the sidebar's layout list and the moves on it |
-| `src/services.rs` | Settings → Services and the first-start welcome window |
+| `src/appearance.rs` | Settings → Appearance, saved looks, the font list |
+| `src/services.rs` | the services' status, opening their Settings page, the first-start welcome window |
 | `src/css.rs` | the Custom theme's CSS: parser and font lookup |
 | `src/fxpanel.rs` | the speed / bass dropdown above the player bar |
 | `src/customize.rs` | custom theme settings and the colour picker |
@@ -276,6 +323,9 @@ also MIT via Feather. They're free for public and commercial use, as long as
 | `STARLITE_FULLSCREEN=1` | open full screen Now Playing |
 | `STARLITE_SEEK=<secs>` | jump there once playback starts |
 | `STARLITE_TIMING=1` | print frame timings and repaint causes |
+| `STARLITE_BLANKCHECK=1` | say when a drawn frame is missing everything but the background |
+| `STARLITE_NOSYNC=1` | don't wait for the screen's refresh before drawing (brings the flicker back, for testing) |
+| `STARLITE_NODESKTOP=1` | Glass on a plain theme without the see-through window |
 | `STARLITE_MINI_OPEN=1` | keep the mini player expanded |
 | `STARLITE_MINI_EDIT=1` | start in the mini player's customize mode |
 | `STARLITE_PAGE=navidrome` | open on the Navidrome page |
@@ -290,15 +340,67 @@ also MIT via Feather. They're free for public and commercial use, as long as
 | `STARLITE_NAV_EDIT=1` | start with the sidebar in edit mode |
 | `STARLITE_NAV_DRAG=entry,y` | in edit mode, drag that entry to height y once |
 | `STARLITE_WELCOME=1` | show the first-start welcome window |
-| `STARLITE_SERVICE=0..4` | the service picked in Settings → Services |
 | `STARLITE_UPDATE_API=http://127.0.0.1:port/latest` | ask a test server on this PC for the latest release |
 | `STARLITE_UPDATE_INSTALL=1` | press Install in the update window once |
-| `STARLITE_GLASS=1\|0` | force liquid glass on / off (doesn't change the saved setting) |
+| `STARLITE_GLASS=0\|1\|2` | force Simple / Glass / Liquid glass (doesn't change the saved setting) |
+| `STARLITE_SETTINGS_TAB=0..11` | open that Settings page (0 Appearance, 1 Layout, 2 Mini player, 3 Playback, 4 Equalizer, 5 Effects, 6–10 Navidrome, Jellyfin, YouTube, Discord, Last.fm, 11 General) |
+| `STARLITE_SETTINGS_SCROLL=<pt>` | start the Settings page scrolled down |
+| `STARLITE_FONT_MENU=1` | open the font list once |
+| `STARLITE_LOOK=<name>`, `STARLITE_LOOK_SAVE=<name>` | switch to / save a look at start |
 | `STARLITE_EQ_SEL=0..10` | the equalizer slider picked at start |
 | `STARLITE_PAGE=jellyfin`, `STARLITE_JF_CONNECT=url\|user\|password` | like the Navidrome ones |
 | `STARLITE_LASTFM_API=<url>` | talk to a test server instead of Last.fm |
 | `STARLITE_LASTFM_CONNECT=key\|secret` | start connecting to Last.fm at once |
 | `STARLITE_LASTFM_FAST=1` | scrobble after five seconds |
+
+## Windows and Linux
+
+Most of Starlite is the same on both. What talks to the system lives in
+`src/win.rs` (Windows) and `src/unix.rs` (Linux, used as `crate::win`
+through `#[path]` in main.rs), with the same functions:
+
+- **Linux runs on X11** (XWayland on a Wayland desktop: main.rs drops
+  `WAYLAND_DISPLAY`), because Wayland lets no app place a window (the mini
+  player at the screen's edge) or put another window inside its own (the
+  YouTube player).
+- What Windows asks the system for (focus, the monitor's size, the mouse
+  over the mini player) Starlite tells `unix.rs` each frame (`note_*`).
+  Without panel sizes, the work area is the whole monitor, and the mini
+  player grows in place instead of sliding past the edge.
+- **YouTube on Linux:** WebKitGTK through wry, as a child of the X11 window.
+  GTK gets its turn every frame while the player exists. The player page is
+  served from `http://127.0.0.1:<port>` (a real origin for YouTube's embed
+  rules).
+- Fonts: fontconfig (`fc-list`); the UI font is the first of Inter, Noto
+  Sans, Cantarell, Ubuntu, Open Sans, DejaVu Sans, Liberation Sans that's
+  there. Data in `$XDG_DATA_HOME/Starlite`, downloads in `~/Music/Starlite`.
+- Frames: vsync on Linux; on Windows each frame waits for the screen's
+  refresh instead (see *Frame pacing*). Glass that blurs the desktop is
+  Windows-only.
+- **Updates on Linux:** the release's `Starlite-<v>-linux-x86_64.tar.gz`,
+  checked against `SHA-256 (Linux):` in the notes (the Windows line,
+  `SHA-256:`, must come first: older versions take the first one).
+
+## Releases
+
+- **Windows zip:** `cargo build --release` with `--remap-path-prefix` for the
+  source, cargo and home folders and `/PDBALTPATH:%_PDB%`, so no personal
+  paths end up in the exe; zipped with `THIRD-PARTY-NOTICES.txt`.
+- **Windows setup** (`setup/`, its own crate, not part of the app's build):
+  `STARLITE_SETUP_PAYLOAD=<folder with Starlite.exe and THIRD-PARTY-NOTICES.txt>
+  cargo build --release` in `setup/`. It installs per user into
+  `%LOCALAPPDATA%\Programs\Starlite` (Start menu and desktop shortcuts, an
+  entry in Settings → Apps under HKCU), copies itself as `Uninstall
+  Starlite.exe`, and also runs without a window: `--silent [--dir <folder>]
+  [--no-desktop]`, `--uninstall --silent [--delete-data]`.
+- **Linux:** built in an Ubuntu 22.04 environment (glibc 2.35, so it runs on
+  older systems too) with the GTK 3, WebKitGTK 4.1 and ALSA dev packages,
+  stripped, packed as `starlite`, `starlite.png`, `THIRD-PARTY-NOTICES.txt`.
+  `install.sh` (in the repo, served raw) installs the system packages, the
+  newest release (checked against its checksum) into `~/.local/lib/starlite`,
+  `~/.local/bin/starlite` and an app menu entry.
+- The notes need `SHA-256: ` + the zip's hash, then `SHA-256 (Linux): ` + the
+  tar.gz's hash (both in backticks).
 
 ## Planned
 

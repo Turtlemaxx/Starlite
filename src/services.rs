@@ -1,18 +1,14 @@
-//! Settings → Services: one menu for everything Starlite connects to
-//! (Navidrome, Jellyfin, YouTube, Discord, Last.fm), each with its
-//! configuration beside it. Also the welcome window of the very first start,
+﻿//! The services Starlite connects to (Navidrome, Jellyfin, YouTube,
+//! Discord, Last.fm): each is its own page in Settings. Also the welcome window of the very first start,
 //! where Navidrome, Jellyfin or both can be connected straight away.
 
-use egui::{pos2, vec2, Align2, Color32, CursorIcon, Id, Rect, Sense, Ui};
+use egui::{pos2, vec2, Align2, Color32, Id, Rect, Sense, Ui};
 
 use crate::app::{smooth, Starlite, View};
 use crate::glass::{El, Kind};
 use crate::icons::Icons;
 use crate::stream::Server;
 use crate::widgets::{field, font, pill, text_trunc};
-
-/// The Settings tab the services live in.
-pub const TAB: usize = 6;
 
 /// The menu: name and icon, in this order.
 pub const SERVICES: [(&str, &str); 5] = [("Navidrome", "navidrome"), ("Jellyfin", "jellyfin"), ("YouTube", "youtube"), ("Discord", "discord"), ("Last.fm", "lastfm")];
@@ -58,12 +54,12 @@ fn done() {
 }
 
 impl Starlite {
-    /// Opens Settings → Services on one of them.
+    /// Opens Settings â†’ Services on one of them.
     pub fn open_service(&mut self, i: usize) {
         self.fullscreen = false;
         self.view = View::Settings;
-        self.settings_tab = TAB;
         self.service_sel = i.min(SERVICES.len() - 1);
+        self.settings_tab = crate::settings::SERVICE0 + self.service_sel;
     }
 
     /// The servers that are connected (the sidebar shows these).
@@ -72,7 +68,7 @@ impl Starlite {
     }
 
     /// A service's line in the menu, and whether it's set up.
-    fn service_status(&self, i: usize) -> (String, bool) {
+    pub fn service_status(&self, i: usize) -> (String, bool) {
         let server = |s: Server| match self.server_connected(s) {
             Some((_, user)) => (format!("Connected as {user}"), true),
             None => ("Not set up".to_string(), false),
@@ -127,7 +123,7 @@ impl Starlite {
 
     /// A server's configuration: sign in, or who's signed in and disconnect.
     #[allow(clippy::too_many_arguments)]
-    fn server_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, top: f32, w: f32, s: Server) {
+    pub fn server_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, top: f32, w: f32, s: Server) {
         let theme = self.theme;
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
@@ -161,7 +157,7 @@ impl Starlite {
         let r = Rect::from_min_size(pos2(x0, bottom + 16.0), vec2(if busy { 170.0 } else { 136.0 }, 38.0));
         let click = pill(ui, icons, els, ppp, Id::new(("srv_connect", s.name())), r, if busy { "Connecting\u{2026}" } else { "Connect" }, Some(s.icon()), true, false, theme).clicked();
         if busy {
-            ctx.request_repaint();
+            ctx.request_repaint_after(std::time::Duration::from_micros(1));
         }
         if (click || enter) && !busy {
             self.sound.click();
@@ -169,62 +165,6 @@ impl Starlite {
         }
         if let Some(e) = self.st(s).error.clone() {
             text_trunc(&p, pos2(x0, r.bottom() + 20.0), Align2::LEFT_CENTER, &e, font(13.0, "semibold"), BAD, w);
-        }
-    }
-
-    /// The Services tab: the menu on the left, the picked one's settings beside it.
-    #[allow(clippy::too_many_arguments)]
-    pub fn services_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, top: f32, content: Rect) {
-        let theme = self.theme;
-        let ctx = ui.ctx().clone();
-        let p = ui.painter().clone();
-        let (mw, row) = (236.0, 52.0);
-        let menu = Rect::from_min_size(pos2(x0, top), vec2(mw, SERVICES.len() as f32 * row + 12.0));
-        els.push(El::rect(menu, ppp, 20.0, 1.0, 8.0, Kind::Glass, 0.0, 0.0));
-        let mut picked = None;
-        let mut hover = None;
-        for (i, (name, icon)) in SERVICES.iter().enumerate() {
-            let r = Rect::from_min_size(pos2(menu.left() + 6.0, menu.top() + 6.0 + i as f32 * row), vec2(mw - 12.0, row));
-            let id = Id::new(("service", i));
-            let resp = ui.interact(r, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-            let sel = self.service_sel == i;
-            let h = ctx.animate_bool_with_time(id.with("h"), resp.hovered() && !sel, 0.14);
-            if h > 0.001 {
-                hover = Some(El::rect(r.shrink(2.0), ppp, 13.0, h, 2.0, Kind::Layered, 0.3 * h, 0.0));
-            }
-            let (status, set_up) = self.service_status(i);
-            icons.paint(ui, icon, pos2(r.left() + 22.0, r.center().y), 18.0, if sel { theme.accent() } else { theme.text_dim() });
-            p.text(pos2(r.left() + 46.0, r.center().y - 8.0), Align2::LEFT_CENTER, *name, font(14.0, "semibold"), if sel { theme.text() } else { theme.text().gamma_multiply(0.86) });
-            text_trunc(&p, pos2(r.left() + 46.0, r.center().y + 10.0), Align2::LEFT_CENTER, &status, font(11.5, "regular"), theme.text_dim(), mw - 12.0 - 46.0 - 30.0);
-            if set_up {
-                icons.paint(ui, "check", pos2(r.right() - 18.0, r.center().y), 14.0, theme.accent());
-            }
-            if resp.clicked() && !sel {
-                picked = Some(i);
-            }
-        }
-        if let Some(h) = hover {
-            els.push(h);
-        }
-        let sy = ctx.animate_value_with_time(Id::new("service_sel_y"), menu.top() + 6.0 + self.service_sel as f32 * row, 0.16);
-        els.push(El::rect(Rect::from_min_size(pos2(menu.left() + 6.0, sy), vec2(mw - 12.0, row)).shrink(2.0), ppp, 13.0, 1.0, 2.0, Kind::Layered, 0.25, 0.0));
-        if let Some(i) = picked {
-            self.sound.click();
-            self.service_sel = i;
-        }
-
-        // The picked one's settings.
-        let cx = menu.right() + 32.0;
-        let w = (content.right() - cx).max(260.0);
-        let top = top + 6.0;
-        match self.service_sel {
-            0 => self.server_settings(ui, icons, els, ppp, cx, top, w, Server::Navidrome),
-            1 => self.server_settings(ui, icons, els, ppp, cx, top, w, Server::Jellyfin),
-            2 => {
-                self.youtube_settings(ui, icons, els, ppp, cx, top, w.min(520.0));
-            }
-            3 => self.discord_settings(ui, icons, els, ppp, cx, top - 6.0, Rect::from_min_max(pos2(cx, content.top()), content.max)),
-            _ => self.lastfm_settings(ui, icons, els, ppp, cx, top - 6.0, w.min(560.0)),
         }
     }
 

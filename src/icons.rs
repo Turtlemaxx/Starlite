@@ -23,7 +23,8 @@ icon_table!(
     "skip-back", "skip-forward", "sparkles", "star", "sun", "trash", "volume-1",
     "volume-2", "volume-x", "x", "zap", "minus", "square", "copy", "maximize-2", "minimize-2",
     "cloudy", "shuffle", "search", "sliders-horizontal", "bubbles", "palette", "file-music",
-    "list-x", "server", "rotate-ccw", "pencil", "grip-vertical", "navidrome", "jellyfin", "youtube", "discord", "lastfm",
+    "list-x", "server", "rotate-ccw", "pencil", "grip-vertical", "chevron-down", "navidrome", "jellyfin", "youtube", "discord", "lastfm",
+    "layout-panel-left", "picture-in-picture-2", "sliders-vertical", "audio-lines",
 );
 
 /// The static name of any bundled icon (covers can use any of them).
@@ -37,20 +38,34 @@ pub const PRESETS: &[&str] = &[
     "flame", "zap", "cloud", "moon", "sun", "leaf", "coffee", "gem", "sparkles", "flower",
 ];
 
+/// Line width of the line icons, x100 (Lucide's own is 2).
+static WEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(200);
+
+/// Thinner or bolder line icons (logos, which are filled, stay as they are).
+pub fn set_weight(w: f32) {
+    WEIGHT.store((w.clamp(1.0, 3.0) * 100.0).round() as u32, std::sync::atomic::Ordering::Relaxed);
+}
+
 #[derive(Default)]
 pub struct Icons {
-    cache: HashMap<(&'static str, u32), TextureHandle>,
+    cache: HashMap<(&'static str, u32, u32), TextureHandle>,
 }
 
 impl Icons {
     fn texture(&mut self, ui: &Ui, name: &'static str, px: u32) -> Option<TextureHandle> {
-        if let Some(t) = self.cache.get(&(name, px)) {
+        let w = WEIGHT.load(std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.cache.get(&(name, px, w)) {
             return Some(t.clone());
         }
         let bytes = ICONS.iter().find(|(n, _)| *n == name)?.1;
-        let img = egui_extras::image::load_svg_bytes_with_size(bytes, Some(SizeHint::Size(px, px))).ok()?;
-        let tex = ui.ctx().load_texture(format!("icon:{name}:{px}"), img, TextureOptions::LINEAR);
-        self.cache.insert((name, px), tex.clone());
+        let img = if w == 200 {
+            egui_extras::image::load_svg_bytes_with_size(bytes, Some(SizeHint::Size(px, px))).ok()?
+        } else {
+            let svg = String::from_utf8_lossy(bytes).replace("stroke-width=\"2\"", &format!("stroke-width=\"{}\"", w as f32 / 100.0));
+            egui_extras::image::load_svg_bytes_with_size(svg.as_bytes(), Some(SizeHint::Size(px, px))).ok()?
+        };
+        let tex = ui.ctx().load_texture(format!("icon:{name}:{px}:{w}"), img, TextureOptions::LINEAR);
+        self.cache.insert((name, px, w), tex.clone());
         Some(tex)
     }
 

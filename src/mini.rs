@@ -62,11 +62,15 @@ pub struct MiniPrefs {
     pub monitor: Option<[i32; 2]>,
     pub scale: f32,
     pub hidden: Vec<String>,
+    /// Show the controls without pointing at the card.
+    pub always_open: bool,
+    /// Colours from the cover behind the card (else dark glass).
+    pub cover_bg: bool,
 }
 
 impl Default for MiniPrefs {
     fn default() -> Self {
-        Self { enabled: true, only_when_playing: false, right: true, y_frac: 0.2, monitor: None, scale: 1.0, hidden: Vec::new() }
+        Self { enabled: true, only_when_playing: false, right: true, y_frac: 0.2, monitor: None, scale: 1.0, hidden: Vec::new(), always_open: false, cover_bg: true }
     }
 }
 
@@ -211,6 +215,7 @@ impl Starlite {
         let right = self.mini.prefs.right;
         let y_frac = self.mini.prefs.y_frac;
         let probe = self.mini.prefs.monitor.unwrap_or([0, 0]);
+        let cover_bg = self.mini.prefs.cover_bg;
         let rt = &mut self.mini.rt;
 
         // Where it docks.
@@ -227,7 +232,8 @@ impl Starlite {
 
         // Expand while the cursor is over the card; collapse the moment it leaves.
         let over = rt.scrub.is_some() || rt.hwnd.is_some_and(crate::win::cursor_in_window) || std::env::var("STARLITE_MINI_OPEN").is_ok();
-        let target = if editing || over { 1.0 } else { 0.0 };
+        let always = self.mini.prefs.always_open;
+        let target = if editing || over || always { 1.0 } else { 0.0 };
         if !offscreen_ok && !editing {
             rt.t = target; // a resizing window can't animate smoothly: snap
         } else if rt.t < target {
@@ -294,6 +300,12 @@ impl Starlite {
 
         ctx.show_viewport_immediate(id, builder, |mctx, _| {
             let mppp = mctx.pixels_per_point();
+            // Linux: whether the mouse is over the card, and where on the screen.
+            let (hover, latest, outer) = mctx.input(|i| (i.pointer.hover_pos().is_some(), i.pointer.latest_pos(), i.viewport().outer_rect));
+            crate::win::note_mini_hover(hover);
+            if let (Some(p), Some(o)) = (latest, outer) {
+                crate::win::note_cursor((o.min.x + p.x) * mppp, (o.min.y + p.y) * mppp);
+            }
             let full = mctx.screen_rect();
             let time = mctx.input(|i| i.time);
             egui::CentralPanel::default().frame(egui::Frame::new()).show(mctx, |ui| {
@@ -384,7 +396,13 @@ impl Starlite {
 
                 let mut frame = self.base_frame(full, mppp, time as f32, 0.0);
                 frame.tree_rect = [-1e5, -1e5, 1.0, 1.0];
-                frame.fs = 1.0;
+                frame.fs = if cover_bg { 1.0 } else { 0.0 };
+                if !cover_bg {
+                    // Dark glass: the dark theme behind the card, whatever the app's theme.
+                    frame.theme = crate::theme::Theme::Dark.shader_id();
+                    frame.bg_album = false;
+                    frame.light_ui = false;
+                }
                 self.set_frame(ui, slot, full, frame, &els);
             });
         });

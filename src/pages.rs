@@ -47,7 +47,7 @@ impl Starlite {
         }
     }
 
-    // ── Music servers (Navidrome, Jellyfin) ────────────────────────
+    // â”€â”€ Music servers (Navidrome, Jellyfin) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[allow(clippy::too_many_arguments)]
     fn server_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect, animating: &mut bool, s: Server) {
@@ -55,7 +55,7 @@ impl Starlite {
         let ctx = ui.ctx().clone();
         let p = ui.painter().clone();
         let Some((url, user)) = self.server_connected(s) else {
-            // Not connected (any more): its sign-in is in Settings → Services.
+            // Not connected (any more): its sign-in is in Settings â†’ Services.
             self.open_service(s as usize);
             return;
         };
@@ -76,7 +76,7 @@ impl Starlite {
             self.load_server(&ctx, s);
         }
         let host = url.split("://").nth(1).unwrap_or(&url).to_string();
-        let who = text_trunc(&p, pos2(rc.x + 34.0, rc.y), Align2::LEFT_CENTER, &format!("{user} · {host}"), font(13.0, "regular"), theme.text_dim(), (content.right() - rc.x - 300.0).max(60.0));
+        let who = text_trunc(&p, pos2(rc.x + 34.0, rc.y), Align2::LEFT_CENTER, &format!("{user} Â· {host}"), font(13.0, "regular"), theme.text_dim(), (content.right() - rc.x - 300.0).max(60.0));
         let dr = Rect::from_min_size(pos2(who.right() + 16.0, rc.y - 16.0), vec2(112.0, 32.0));
         if pill(ui, icons, els, ppp, Id::new("nd_disconnect"), dr, "Disconnect", None, false, false, theme).clicked() {
             self.sound.click();
@@ -94,7 +94,7 @@ impl Starlite {
                 if !loading {
                     self.load_server(&ctx, s);
                 }
-                "Loading playlists…".to_string()
+                "Loading playlistsâ€¦".to_string()
             } else if let Some(e) = &self.st(s).error {
                 e.clone()
             } else {
@@ -151,7 +151,7 @@ impl Starlite {
         }
     }
 
-    // ── Explore ────────────────────────────────────────────────────
+    // â”€â”€ Explore â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[allow(clippy::too_many_arguments)]
     fn explore_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, dt: f32, content: Rect, animating: &mut bool) {
@@ -220,7 +220,7 @@ impl Starlite {
             .explore
             .playlists
             .iter()
-            .map(|p| Card { art: p.artwork.clone(), title: p.title.clone(), sub: if p.track_count > 0 { format!("{} · {} songs", p.artist, p.track_count) } else { p.artist.clone() } })
+            .map(|p| Card { art: p.artwork.clone(), title: p.title.clone(), sub: if p.track_count > 0 { format!("{} Â· {} songs", p.artist, p.track_count) } else { p.artist.clone() } })
             .collect();
         let (mut s, mut st) = (self.explore.pl_scroll, self.explore.pl_scroll_to);
         let c2 = if b2.bottom() <= content.bottom() + 8.0 {
@@ -243,7 +243,7 @@ impl Starlite {
         }
     }
 
-    // ── Playlists ──────────────────────────────────────────────────
+    // â”€â”€ Playlists â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     fn local_playlist_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect, id: &str) {
         let (kind, title, header, tracks) = if id == DOWNLOADED_ID {
@@ -276,7 +276,7 @@ impl Starlite {
             *animating = true;
         }
         let src = server.map_or("YouTube", |s| s.name());
-        let sub = if pl.track_count > 0 { format!("by {} · {} songs · {src}", pl.artist, pl.track_count) } else { format!("by {} · {src}", pl.artist) };
+        let sub = if pl.track_count > 0 { format!("by {} Â· {} songs Â· {src}", pl.artist, pl.track_count) } else { format!("by {} Â· {src}", pl.artist) };
         self.playlist_page(ui, icons, els, ppp, content, PlKind::Remote, &pl.title, &sub, Header::Url(pl.artwork.clone()), &tracks, loading, error, pl.permalink.clone(), back);
     }
 
@@ -315,8 +315,8 @@ impl Starlite {
         // Header: cover, name, count, actions.
         let art = Rect::from_min_size(pos2(content.left() + if back.is_some() { 54.0 } else { 0.0 }, 28.0), Vec2::splat(120.0));
         match &header {
-            Header::Local(c) => playlist_cover(ui, icons, art, c, 18.0, theme),
-            Header::Url(u) => cover(ui, icons, art, u.as_deref(), 18.0, "disc-3", theme),
+            Header::Local(c) => playlist_cover(ui, icons, art, c, 10.0, theme),
+            Header::Url(u) => cover(ui, icons, art, u.as_deref(), 10.0, "disc-3", theme),
         }
         let tx = art.right() + 24.0;
         text_trunc(&p, pos2(tx, art.top() + 30.0), Align2::LEFT_CENTER, title, font(28.0, "bold"), theme.text(), content.right() - tx);
@@ -324,8 +324,8 @@ impl Starlite {
 
         let mut bx = tx;
         let by = art.bottom() - 38.0;
-        let play_r = Rect::from_min_size(pos2(bx, by), vec2(104.0, 38.0));
-        if pill(ui, icons, els, ppp, Id::new("pl_play"), play_r, "Play", Some("play"), true, false, theme).clicked() && !tracks.is_empty() {
+        let play_r = Rect::from_min_size(pos2(bx, by), vec2(100.0, 38.0));
+        if crate::widgets::primary(ui, icons, Id::new("pl_play"), play_r, "Play", Some("play"), theme).clicked() && !tracks.is_empty() {
             self.sound.click();
             self.play_list(tracks.to_vec(), 0);
         }
@@ -355,7 +355,7 @@ impl Starlite {
                 end = r.right();
                 if pill(ui, icons, els, ppp, Id::new("pl_folder"), r, "Open folder", None, false, false, theme).clicked() {
                     self.sound.click();
-                    let _ = std::process::Command::new("explorer").arg(downloads_dir()).spawn();
+                    crate::win::open(downloads_dir().as_os_str());
                 }
             }
             PlKind::Remote => {
@@ -388,7 +388,7 @@ impl Starlite {
         let shown = filter_tracks(tracks, &query);
         let no_match = !tracks.is_empty() && shown.is_empty();
 
-        // CD shelf instead of the list (Settings → Appearance).
+        // CD shelf instead of the list (Settings â†’ Appearance).
         if self.shelf.prefs.enabled && !tracks.is_empty() {
             let area = Rect::from_min_max(pos2(content.left(), art.bottom() + 16.0), content.max);
             if no_match {
@@ -406,19 +406,17 @@ impl Starlite {
                 self.play_list(tracks.to_vec(), shown[j]);
             }
             if anim {
-                ctx.request_repaint();
+                ctx.request_repaint_after(std::time::Duration::from_micros(1));
             }
             return;
         }
 
-        // Track list in a glass bubble.
+        // The song list, straight on the page.
         let list = Rect::from_min_max(pos2(content.left(), art.bottom() + 24.0), pos2(content.right(), content.bottom().max(art.bottom() + 150.0)));
-        els.push(El::rect(list, ppp, 24.0, 1.0, 10.0, Kind::Glass, 0.0, 0.0));
-        let inner = list.shrink2(vec2(10.0, 12.0));
 
         if tracks.is_empty() {
             let (msg, sub2) = if loading {
-                ("Loading…", "")
+                ("Loadingâ€¦", "")
             } else if let Some(e) = &error {
                 (e.as_str(), "")
             } else {
@@ -451,6 +449,26 @@ impl Starlite {
         let liked_ids: Vec<String> = self.lib.liked().tracks.iter().map(|t| t.id.clone()).collect();
         let mut acts: Vec<RowAct> = Vec::new();
         let blocked = self.overlay_open();
+        let ((row_h, cov), numbers, album_on) = (self.look.rows.sizes(), self.look.show_numbers, self.look.show_album);
+        // Column names, and a line under them.
+        let text_x = if numbers { 46.0 } else { 14.0 } + cov + 14.0;
+        // The album gets its own column when there's room for it.
+        let album_col = album_on && list.width() >= 640.0 && tracks.iter().any(|t| t.album.as_deref().is_some_and(|a| !a.is_empty()));
+        let album_x = (list.width() * 0.56).max(text_x + 220.0);
+        {
+            let hy = list.top() + 12.0;
+            let (f, c) = (font(12.0, "regular"), theme.text_dim());
+            if numbers {
+                p.text(pos2(list.left() + 24.0, hy), Align2::CENTER_CENTER, "#", f.clone(), c);
+            }
+            p.text(pos2(list.left() + text_x, hy), Align2::LEFT_CENTER, "Title", f.clone(), c);
+            if album_col {
+                p.text(pos2(list.left() + album_x, hy), Align2::LEFT_CENTER, "Album", f.clone(), c);
+            }
+            p.text(pos2(list.right() - 16.0, hy), Align2::RIGHT_CENTER, "Time", f, c);
+            p.hline(list.left() + 8.0..=list.right() - 8.0, list.top() + 28.0, egui::Stroke::new(1.0_f32, theme.hairline().gamma_multiply(0.7)));
+        }
+        let inner = Rect::from_min_max(pos2(list.left(), list.top() + 34.0), list.max);
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(inner));
         child.set_clip_rect(inner);
         egui::ScrollArea::vertical()
@@ -461,25 +479,34 @@ impl Starlite {
                 let w = ui.available_width();
                 for &i in &shown {
                     let t = &tracks[i];
-                    let (row, resp) = ui.allocate_exact_size(vec2(w, 54.0), Sense::click());
+                    let (row, resp) = ui.allocate_exact_size(vec2(w, row_h), Sense::click());
                     let hovered = resp.contains_pointer() && !blocked;
                     let rp = ui.painter();
                     let ha = ui.ctx().animate_bool_with_time(Id::new(("row_h", title, i)), hovered, 0.12);
                     if ha > 0.0 {
                         let c = if theme.is_light() { Color32::from_black_alpha((10.0 * ha) as u8) } else { Color32::from_white_alpha((12.0 * ha) as u8) };
-                        rp.rect_filled(row, CornerRadius::same(12), c);
+                        rp.rect_filled(row, CornerRadius::same(8), c);
                     }
                     let is_cur = current.as_deref() == Some(t.id.as_str());
                     let cy = row.center().y;
-                    rp.text(pos2(row.left() + 24.0, cy), Align2::CENTER_CENTER, format!("{}", i + 1), font(12.5, "regular"), if is_cur { theme.accent() } else { theme.text_dim() });
-                    let art = Rect::from_center_size(pos2(row.left() + 66.0, cy), Vec2::splat(40.0));
+                    if numbers {
+                        rp.text(pos2(row.left() + 24.0, cy), Align2::CENTER_CENTER, format!("{}", i + 1), font(12.5, "regular"), if is_cur { theme.accent() } else { theme.text_dim() });
+                    }
+                    let art = Rect::from_center_size(pos2(row.left() + if numbers { 46.0 } else { 14.0 } + cov * 0.5, cy), Vec2::splat(cov));
                     cover(ui, icons, art, t.artwork.as_deref(), 8.0, "disc-3", theme);
                     let tx = art.right() + 14.0;
                     let right_pad = 150.0;
-                    let tw = (row.right() - right_pad - tx).max(40.0);
+                    let tw = if album_col { album_x - (tx - row.left()) - 24.0 } else { (row.right() - right_pad - tx).max(40.0) };
                     let rp = ui.painter();
-                    text_trunc(rp, pos2(tx, cy - 9.0), Align2::LEFT_CENTER, &t.title, font(14.0, "semibold"), if is_cur { theme.accent() } else { theme.text() }, tw);
-                    let artist = match t.source_name() { Some(src) => format!("{} · {src}", t.artist), None => t.artist.clone() };
+                    text_trunc(rp, pos2(tx, cy - 9.0), Align2::LEFT_CENTER, &t.title, font(14.0, "regular"), if is_cur { theme.accent() } else { theme.text() }, tw);
+                    let mut artist = match t.source_name() { Some(src) => format!("{} Â· {src}", t.artist), None => t.artist.clone() };
+                    if let Some(album) = t.album.as_deref().filter(|a| album_on && !a.is_empty()) {
+                        if album_col {
+                            text_trunc(rp, pos2(row.left() + album_x, cy), Align2::LEFT_CENTER, album, font(13.0, "regular"), theme.text_dim(), (row.right() - right_pad - row.left() - album_x).max(40.0));
+                        } else {
+                            artist = format!("{artist} Â· {album}");
+                        }
+                    }
                     text_trunc(rp, pos2(tx, cy + 10.0), Align2::LEFT_CENTER, &artist, font(12.5, "regular"), theme.text_dim(), tw);
                     rp.text(pos2(row.right() - 16.0, cy), Align2::RIGHT_CENTER, fmt_duration(t.duration_ms), font(12.5, "regular"), theme.text_dim());
 
@@ -534,160 +561,6 @@ impl Starlite {
         }
     }
 
-    // ── Settings ───────────────────────────────────────────────────
-
-    fn settings_page(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, content: Rect) {
-        let theme = self.theme;
-        let ctx = ui.ctx().clone();
-        let p = ui.painter().clone();
-        let x0 = content.left();
-        p.text(pos2(x0, 30.0), Align2::LEFT_TOP, "Settings", font(30.0, "bold"), theme.text());
-
-        // Tabs: one glass strip with a glass highlight that slides between them.
-        const TABS: [&str; 7] = ["Appearance", "Playback", "Equalizer", "Effects", "Mini player", "Lyrics", "Services"];
-        let f = font(13.5, "semibold");
-        let text_w: Vec<f32> = TABS.iter().map(|t| p.layout_no_wrap(t.to_string(), f.clone(), theme.text()).size().x).collect();
-        // Less air between the names when the window is narrow.
-        let pad = ((content.width() - 8.0 - text_w.iter().sum::<f32>()) / TABS.len() as f32).clamp(14.0, 34.0);
-        let widths: Vec<f32> = text_w.iter().map(|w| w + pad).collect();
-        let strip = Rect::from_min_size(pos2(x0, 88.0), vec2(widths.iter().sum::<f32>() + 8.0, 40.0));
-        els.push(El::rect(strip, ppp, 20.0, 1.0, 6.0, Kind::Glass, 0.0, 0.0));
-        let mut x = strip.left() + 4.0;
-        let mut sel_rect = None;
-        for (i, (name, w)) in TABS.iter().zip(&widths).enumerate() {
-            let r = Rect::from_min_size(pos2(x, strip.top() + 4.0), vec2(*w, 32.0));
-            x += w;
-            let resp = ui.interact(r, Id::new(("settings_tab", i)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-            if resp.clicked() && self.settings_tab != i {
-                self.sound.click();
-                self.settings_tab = i;
-            }
-            let selected = self.settings_tab == i;
-            if selected {
-                sel_rect = Some(r);
-            }
-            let c = if selected || resp.hovered() { theme.text() } else { theme.text_dim() };
-            p.text(r.center(), Align2::CENTER_CENTER, *name, f.clone(), c);
-        }
-        if let Some(r) = sel_rect {
-            let l = ctx.animate_value_with_time(Id::new("settings_tab_l"), r.left(), 0.18);
-            let w = ctx.animate_value_with_time(Id::new("settings_tab_w"), r.width(), 0.18);
-            els.push(El::rect(Rect::from_min_size(pos2(l, r.top()), vec2(w, r.height())), ppp, 16.0, 1.0, 2.0, Kind::Layered, 0.25, 0.0));
-        }
-        let top = 154.0;
-
-        match self.settings_tab {
-            0 => {
-                // Appearance.
-                let gap = 14.0;
-                let n = Theme::ALL.len();
-                // One row when they fit, else two.
-                let cols = if content.width() >= n as f32 * 116.0 + (n - 1) as f32 * gap { n } else { n.div_ceil(2) };
-                let bw = ((content.width() - gap * (cols as f32 - 1.0)) / cols as f32).clamp(110.0, 176.0);
-                let bh = if cols == n { 100.0 } else { 84.0 };
-                let mut clicked_theme = None;
-                for (i, t) in Theme::ALL.into_iter().enumerate() {
-                    let (c, r) = (i % cols, i / cols);
-                    let base = Rect::from_min_size(pos2(x0 + c as f32 * (bw + gap), top + r as f32 * (bh + gap)), vec2(bw, bh));
-                    let id = Id::new(("theme", t.label()));
-                    let resp = ui.interact(base, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
-                    let h = ctx.animate_bool_with_time(id.with("h"), resp.hovered(), 0.16);
-                    let pr = ctx.animate_bool_with_time(id.with("p"), resp.is_pointer_button_down_on(), 0.10);
-                    let selected = theme == t;
-                    let r = Rect::from_center_size(base.center() - vec2(0.0, 2.0 * h), base.size() + Vec2::splat(6.0 * pr));
-                    els.push(El::rect(r, ppp, 20.0, 1.0, 8.0 + 4.0 * h, Kind::Glass, if selected { 0.35 } else { 0.0 } + 0.5 * h, pr));
-                    icons.paint(ui, t.icon(), r.min + vec2(28.0, 28.0), 22.0, if selected { theme.accent() } else { theme.text() });
-                    p.text(r.left_bottom() + vec2(16.0, -22.0), Align2::LEFT_CENTER, t.label(), font(14.5, "semibold"), theme.text());
-                    if selected {
-                        icons.paint(ui, "check", r.right_top() + vec2(-24.0, 24.0), 16.0, theme.accent());
-                    }
-                    if resp.clicked() && !selected {
-                        clicked_theme = Some(t);
-                    }
-                }
-                if let Some(t) = clicked_theme {
-                    self.sound.click();
-                    self.theme = t;
-                    t.save();
-                    self.apply_theme(&ctx);
-                }
-                let rows = n.div_ceil(cols) as f32;
-                let mut y = top + rows * bh + (rows - 1.0) * gap + 22.0;
-                if self.theme == Theme::Custom {
-                    y = self.custom_theme_settings(ui, icons, els, ppp, x0, y, content.width().min(540.0)) + 24.0;
-                }
-                let mut glass = self.look.liquid_glass;
-                let r = Rect::from_min_size(pos2(x0, y), vec2(content.width().min(520.0), 52.0));
-                if toggle_row(ui, r, Id::new("liquid_glass"), "Liquid glass", Some("Glass that bends and reflects what's behind it. Off: simple, flat panels"), &mut glass, theme) {
-                    self.sound.click();
-                    self.look.liquid_glass = glass;
-                    self.look.save();
-                }
-                y += 60.0;
-                let mut on = self.shelf.prefs.enabled;
-                let r = Rect::from_min_size(pos2(x0, y), vec2(content.width().min(520.0), 52.0));
-                if toggle_row(ui, r, Id::new("shelf_on"), "CD shelf", Some("Shows playlists as CD cases on a bookshelf"), &mut on, theme) {
-                    self.sound.click();
-                    self.shelf.prefs.enabled = on;
-                    self.shelf.prefs.save();
-                }
-                let mut notify = self.updater.prefs.notify;
-                let r = Rect::from_min_size(pos2(x0, y + 60.0), vec2(content.width().min(520.0), 52.0));
-                if toggle_row(ui, r, Id::new("update_notify"), "Update notifications", Some(concat!("Says when a new version is out and can install it. You have ", env!("CARGO_PKG_VERSION"))), &mut notify, theme) {
-                    self.sound.click();
-                    self.updater.set_notify(notify, &ctx);
-                }
-            }
-            1 => self.playback_settings(ui, els, ppp, x0, top, content.width().min(560.0)),
-            2 => self.equalizer_settings(ui, icons, els, ppp, x0, top, content),
-            3 => self.effects_settings(ui, x0, top - 8.0, content),
-            // Navidrome, Jellyfin, YouTube, Discord and Last.fm.
-            crate::services::TAB => self.services_settings(ui, icons, els, ppp, x0, top, content),
-            4 => {
-                // Mini player: on / off and the customize mode.
-                let w = content.width().min(520.0);
-                let mut on = self.mini.prefs.enabled;
-                if toggle_row(ui, Rect::from_min_size(pos2(x0, top), vec2(w, 52.0)), Id::new("mini_on"), "Mini player", Some("Shows up at the edge of the screen while you're in another app"), &mut on, theme) {
-                    self.sound.click();
-                    self.mini.prefs.enabled = on;
-                    if !on {
-                        self.mini.editing = false;
-                    }
-                    self.mini.prefs.save();
-                }
-                if on {
-                    let mut only = self.mini.prefs.only_when_playing;
-                    if toggle_row(ui, Rect::from_min_size(pos2(x0, top + 60.0), vec2(w, 52.0)), Id::new("mini_only_playing"), "Only while music is playing", Some("Off: also shows when the song is paused"), &mut only, theme) {
-                        self.sound.click();
-                        self.mini.prefs.only_when_playing = only;
-                        self.mini.prefs.save();
-                    }
-                    let editing = self.mini.editing;
-                    let r = Rect::from_min_size(pos2(x0, top + 130.0), vec2(if editing { 132.0 } else { 236.0 }, 38.0));
-                    let label = if editing { "Done" } else { "Change position & size" };
-                    if pill(ui, icons, els, ppp, Id::new("mini_customize"), r, label, Some(if editing { "check" } else { "maximize-2" }), true, false, theme).clicked() {
-                        self.sound.click();
-                        self.mini.editing = !editing;
-                        if editing {
-                            self.mini.prefs.save();
-                        }
-                    }
-                }
-            }
-            5 => {
-                // Lyrics: look them up online or only use the song's own.
-                let mut on = self.lprefs.online;
-                if toggle_row(ui, Rect::from_min_size(pos2(x0, top), vec2(content.width().min(520.0), 52.0)), Id::new("lyrics_online"), "Find lyrics online", Some("Gets timed lyrics for the song you're playing from lrclib.net"), &mut on, theme) {
-                    self.sound.click();
-                    self.lprefs.online = on;
-                    self.lprefs.save();
-                    self.load_lyrics(&ctx);
-                }
-            }
-            _ => {}
-        }
-    }
-
     /// Discord Rich Presence: on / off, the Application ID, what to show.
     #[allow(clippy::too_many_arguments)]
     pub fn discord_settings(&mut self, ui: &mut Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x0: f32, top: f32, content: Rect) {
@@ -722,7 +595,7 @@ impl Starlite {
             ctx.open_url(egui::OpenUrl::new_tab("https://discord.com/developers/applications"));
         }
         let r2 = Rect::from_min_size(pos2(r1.right() + 10.0, fr.top()), vec2(150.0, 38.0));
-        if r2.right() <= content.right() && pill(ui, icons, els, ppp, Id::new("dc_icon"), r2, "Save icon…", Some("download"), false, false, theme).on_hover_text("The white Starlite icon to upload as the art asset").clicked() {
+        if r2.right() <= content.right() && pill(ui, icons, els, ppp, Id::new("dc_icon"), r2, "Save iconâ€¦", Some("download"), false, false, theme).on_hover_text("The white Starlite icon to upload as the art asset").clicked() {
             self.sound.click();
             if let Some(path) = rfd::FileDialog::new().set_file_name("starlite.png").add_filter("PNG", &["png"]).save_file() {
                 match std::fs::write(&path, crate::logo::WHITE_PNG) {
@@ -732,7 +605,7 @@ impl Starlite {
             }
         }
         let help = format!(
-            "Create an application named \"Starlite\" in the Developer Portal and paste its Application ID here. Under Rich Presence → Art Assets, upload the Starlite icon with the name \"{}\".",
+            "Create an application named \"Starlite\" in the Developer Portal and paste its Application ID here. Under Rich Presence â†’ Art Assets, upload the Starlite icon with the name \"{}\".",
             crate::discord::ICON_ASSET
         );
         let g = p.layout(help, font(12.5, "regular"), theme.text_dim(), w);
@@ -787,7 +660,7 @@ impl Starlite {
             }
         } else {
             let r = Rect::from_min_size(pos2(x0, yy), vec2(200.0, 38.0));
-            let label = if self.yt_busy { "Waiting for browser…" } else { "Sign in with Google" };
+            let label = if self.yt_busy { "Waiting for browserâ€¦" } else { "Sign in with Google" };
             let resp = pill(ui, icons, els, ppp, Id::new("yt_signin"), r, label, Some("youtube"), true, false, theme);
             if resp.clicked() {
                 self.sound.click();
@@ -824,7 +697,7 @@ impl Starlite {
             text_trunc(&p, pos2(x0, yy + 6.0), Align2::LEFT_CENTER, msg, font(12.5, "semibold"), c, w);
             yy += 24.0;
         }
-        text_trunc(&p, pos2(x0, yy + 6.0), Align2::LEFT_CENTER, "Free key: Google Cloud → enable YouTube Data API v3 → Credentials.", font(12.0, "regular"), theme.text_dim(), w);
+        text_trunc(&p, pos2(x0, yy + 6.0), Align2::LEFT_CENTER, "Free key: Google Cloud â†’ enable YouTube Data API v3 â†’ Credentials.", font(12.0, "regular"), theme.text_dim(), w);
         let link = text_trunc(&p, pos2(x0, yy + 28.0), Align2::LEFT_CENTER, "Open Google Cloud console", font(12.0, "semibold"), theme.accent(), w);
         if ui.interact(link, Id::new("yt_console"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).clicked() {
             ctx.open_url(egui::OpenUrl::new_tab("https://console.cloud.google.com/apis/library/youtube.googleapis.com"));
@@ -962,16 +835,24 @@ pub fn toggle_row(ui: &mut Ui, r: Rect, id: Id, label: &str, sub: Option<&str>, 
     if flipped {
         *on = !*on;
     }
-    let t = ctx.animate_bool_with_time(id.with("t"), *on, 0.16);
-    let track = Rect::from_center_size(pos2(r.right() - 24.0, r.center().y), vec2(42.0, 24.0));
-    let off_c = if theme.is_light() { Color32::from_black_alpha(36) } else { Color32::from_white_alpha(34) };
-    let on_c = if theme.is_light() { Color32::from_rgb(30, 30, 34) } else { Color32::from_rgb(235, 235, 240) };
-    p.rect_filled(track, CornerRadius::same(12), lerp_color(off_c, on_c, t));
-    let knob_c = if theme.is_light() || t < 0.5 { Color32::WHITE } else { Color32::from_rgb(28, 28, 32) };
-    let kc = pos2(track.left() + 12.0 + 18.0 * t, track.center().y);
-    p.circle_filled(kc + vec2(0.0, 1.0), 10.0, Color32::from_black_alpha(40));
-    p.circle_filled(kc, 9.5, knob_c);
+    switch(ui, id, pos2(r.right() - 22.0, r.center().y), *on, theme);
     flipped
+}
+
+/// An on / off switch centred on `c` (the accent when on).
+pub fn switch(ui: &Ui, id: Id, c: egui::Pos2, on: bool, theme: Theme) {
+    let p = ui.painter();
+    let t = ui.ctx().animate_bool_with_time(id.with("t"), on, 0.16);
+    let track = Rect::from_center_size(c, vec2(40.0, 24.0));
+    let off_c = if theme.is_light() { Color32::from_black_alpha(34) } else { Color32::from_white_alpha(30) };
+    let on_c = theme.accent();
+    p.rect_filled(track, CornerRadius::same(12), lerp_color(off_c, on_c, t));
+    // The knob stays easy to see on a very light accent.
+    let light_accent = on_c.r() as u32 + on_c.g() as u32 + on_c.b() as u32 > 600;
+    let knob_c = if t > 0.5 && light_accent { Color32::from_rgb(28, 28, 32) } else { Color32::WHITE };
+    let kc = pos2(track.left() + 12.0 + 16.0 * t, track.center().y);
+    p.circle_filled(kc + vec2(0.0, 1.0), 10.0, Color32::from_black_alpha(36));
+    p.circle_filled(kc, 9.5, knob_c);
 }
 
 fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {

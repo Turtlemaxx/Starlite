@@ -42,13 +42,172 @@ static CUSTOM: RwLock<Option<CustomTheme>> = RwLock::new(None);
 /// The simple look is on (liquid glass off): plain greys for backgrounds.
 static FLAT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
 
-/// How the window is drawn (look.json).
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug, Default)]
+/// How panels are drawn.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub enum Style {
+    /// Flat, solid panels.
+    #[default]
+    Simple,
+    /// Like Simple, but see-through: what's behind is blurred.
+    Glass,
+    /// Glass that bends and reflects what's behind it.
+    Liquid,
+}
+
+impl Style {
+    pub const ALL: [Style; 3] = [Style::Simple, Style::Glass, Style::Liquid];
+    pub fn label(self) -> &'static str {
+        match self {
+            Style::Simple => "Simple",
+            Style::Glass => "Glass",
+            Style::Liquid => "Liquid glass",
+        }
+    }
+    pub fn shader_id(self) -> i32 {
+        self as i32
+    }
+}
+
+/// Where the accent colour comes from.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub enum AccentFrom {
+    /// The theme's own.
+    #[default]
+    Theme,
+    /// The cover of the song that's playing.
+    Album,
+    /// A colour you pick.
+    Picked,
+}
+
+/// The page background.
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub enum Backdrop {
+    #[default]
+    Theme,
+    /// Slowly drifting colours from the playing song's cover.
+    Album,
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
+pub enum RowSize {
+    Compact,
+    #[default]
+    Normal,
+    Large,
+}
+
+impl RowSize {
+    pub const ALL: [RowSize; 3] = [RowSize::Compact, RowSize::Normal, RowSize::Large];
+    pub fn label(self) -> &'static str {
+        match self {
+            RowSize::Compact => "Compact",
+            RowSize::Normal => "Normal",
+            RowSize::Large => "Large",
+        }
+    }
+    /// Row height and cover size.
+    pub fn sizes(self) -> (f32, f32) {
+        match self {
+            RowSize::Compact => (42.0, 30.0),
+            RowSize::Normal => (54.0, 40.0),
+            RowSize::Large => (68.0, 54.0),
+        }
+    }
+}
+
+/// The player bar's buttons that can be hidden (right to left).
+pub const BAR_BUTTONS: [(&str, &str); 5] = [("download", "Download"), ("add", "Add to playlist"), ("like", "Like"), ("loop", "Loop"), ("fx", "Speed and bass")];
+
+/// How the window looks (look.json): the panel style, and what the
+/// Advanced part of Settings → Appearance changes. `None`: the look's own.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 #[serde(default)]
 pub struct LookPrefs {
-    /// Glass that bends and reflects what's behind it. Off (the default):
-    /// simple flat panels.
-    pub liquid_glass: bool,
+    pub style: Style,
+    /// From before there were three styles.
+    #[serde(skip_serializing)]
+    pub liquid_glass: Option<bool>,
+    /// The Advanced options are shown.
+    pub advanced: bool,
+    pub accent_from: AccentFrom,
+    pub accent: [u8; 3],
+    /// Largest corner radius of panels (points).
+    pub round: Option<f32>,
+    /// How solid panels are (1: the look's own; less is more see-through).
+    pub solid: Option<f32>,
+    /// How much panels blur what's behind them (points).
+    pub blur: Option<f32>,
+    pub outline: Option<f32>,
+    pub shadow: Option<f32>,
+    /// A font installed on this PC.
+    pub font: Option<String>,
+    pub text_size: f32,
+    /// Icon line width (2 is Lucide's own).
+    pub icon_weight: f32,
+    pub backdrop: Backdrop,
+    /// Moving backgrounds (Cherry Blossom, Stars, Bubbles): speed and how many.
+    pub motion_speed: f32,
+    pub motion_amount: f32,
+    // Layout.
+    pub rows: RowSize,
+    pub show_numbers: bool,
+    pub show_album: bool,
+    pub nav_width: f32,
+    pub nav_covers: bool,
+    /// Player bar buttons that are hidden (see `BAR_BUTTONS`).
+    pub bar_hidden: Vec<String>,
+    /// The click sound, and your own sound file for it.
+    pub click: crate::sound::ClickSound,
+    pub click_file: Option<PathBuf>,
+}
+
+impl Default for LookPrefs {
+    fn default() -> Self {
+        Self {
+            style: Style::Simple,
+            liquid_glass: None,
+            advanced: false,
+            accent_from: AccentFrom::Theme,
+            accent: [150, 130, 255],
+            round: None,
+            solid: None,
+            blur: None,
+            outline: None,
+            shadow: None,
+            font: None,
+            text_size: 1.0,
+            icon_weight: 2.0,
+            backdrop: Backdrop::Theme,
+            motion_speed: 1.0,
+            motion_amount: 1.0,
+            rows: RowSize::Normal,
+            show_numbers: true,
+            show_album: false,
+            nav_width: 232.0,
+            nav_covers: true,
+            bar_hidden: Vec::new(),
+            click: crate::sound::ClickSound::Classic,
+            click_file: None,
+        }
+    }
+}
+
+/// Picked accent colour for every theme (None: the theme's own).
+static ACCENT: RwLock<Option<[u8; 3]>> = RwLock::new(None);
+/// Text size (1 = normal), as f32 bits.
+static TEXT_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+
+/// The accent every theme uses for now (None: each theme's own).
+pub fn set_accent(c: Option<[u8; 3]>) {
+    let mut a = ACCENT.write().unwrap();
+    if *a != c {
+        *a = c;
+    }
+}
+
+pub fn text_scale() -> f32 {
+    f32::from_bits(TEXT_SCALE.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 impl LookPrefs {
@@ -57,12 +216,40 @@ impl LookPrefs {
     }
     pub fn load() -> Self {
         let mut p: Self = std::fs::read_to_string(Self::file()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-        // Debug: STARLITE_GLASS=1 / 0 forces liquid glass on / off.
-        if let Ok(v) = std::env::var("STARLITE_GLASS") {
-            p.liquid_glass = v != "0";
+        if p.liquid_glass.take() == Some(true) {
+            p.style = Style::Liquid;
         }
+        // Debug: STARLITE_GLASS=0 / 1 / 2 forces simple / glass / liquid glass.
+        if let Ok(v) = std::env::var("STARLITE_GLASS") {
+            p.style = match v.as_str() {
+                "0" => Style::Simple,
+                "2" => Style::Liquid,
+                _ => Style::Glass,
+            };
+        }
+        // Debug: STARLITE_ADVANCED=1 opens the Advanced options.
+        if std::env::var("STARLITE_ADVANCED").is_ok() {
+            p.advanced = true;
+        }
+        p = p.clamped();
         p.apply();
         p
+    }
+    /// Every value in its range (a hand-edited file can't break the window).
+    pub fn clamped(mut self) -> Self {
+        let f = |v: f32, lo: f32, hi: f32, or: f32| if v.is_finite() { v.clamp(lo, hi) } else { or };
+        self.round = self.round.map(|v| f(v, 0.0, 40.0, 14.0));
+        self.solid = self.solid.map(|v| f(v, 0.0, 3.0, 1.0));
+        self.blur = self.blur.map(|v| f(v, 0.0, 48.0, 16.0));
+        self.outline = self.outline.map(|v| f(v, 0.0, 3.0, 1.0));
+        self.shadow = self.shadow.map(|v| f(v, 0.0, 3.0, 1.0));
+        self.text_size = f(self.text_size, 0.85, 1.2, 1.0);
+        self.icon_weight = f(self.icon_weight, 1.25, 2.75, 2.0);
+        self.motion_speed = f(self.motion_speed, 0.0, 3.0, 1.0);
+        self.motion_amount = f(self.motion_amount, 0.2, 2.0, 1.0);
+        self.nav_width = f(self.nav_width, 196.0, 300.0, 232.0);
+        self.font = self.font.filter(|s| !s.trim().is_empty());
+        self
     }
     pub fn save(&self) {
         let f = Self::file();
@@ -74,10 +261,74 @@ impl LookPrefs {
         }
         self.apply();
     }
-    fn apply(&self) {
-        FLAT.store(!self.liquid_glass, std::sync::atomic::Ordering::Relaxed);
+    /// Puts the values the whole app reads in place.
+    pub fn apply(&self) {
+        FLAT.store(self.style != Style::Liquid, std::sync::atomic::Ordering::Relaxed);
+        TEXT_SCALE.store(self.text_size.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        crate::icons::set_weight(self.icon_weight);
+        if self.accent_from == AccentFrom::Picked {
+            set_accent(Some(self.accent));
+        } else if self.accent_from == AccentFrom::Theme {
+            set_accent(None);
+        }
+    }
+    /// The Advanced values back to the look's own (style and layout stay).
+    pub fn reset_look(&mut self) {
+        let d = LookPrefs::default();
+        self.accent_from = d.accent_from;
+        self.round = None;
+        self.solid = None;
+        self.blur = None;
+        self.outline = None;
+        self.shadow = None;
+        self.font = None;
+        self.text_size = d.text_size;
+        self.icon_weight = d.icon_weight;
+        self.backdrop = d.backdrop;
+        self.motion_speed = d.motion_speed;
+        self.motion_amount = d.motion_amount;
+    }
+    pub fn reset_layout(&mut self) {
+        let d = LookPrefs::default();
+        self.rows = d.rows;
+        self.show_numbers = d.show_numbers;
+        self.show_album = d.show_album;
+        self.nav_width = d.nav_width;
+        self.nav_covers = d.nav_covers;
+        self.bar_hidden.clear();
+    }
+    pub fn shows(&self, button: &str) -> bool {
+        !self.bar_hidden.iter().any(|b| b == button)
     }
 }
+
+/// A saved look: theme, colours, picture, CSS, style and everything in
+/// Advanced, under a name (looks.json).
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct SavedLook {
+    pub name: String,
+    pub theme: String,
+    pub custom: CustomTheme,
+    pub look: LookPrefs,
+    /// The Custom theme's CSS at the time (None: there was none).
+    #[serde(default)]
+    pub css: Option<String>,
+}
+
+pub fn load_looks() -> Vec<SavedLook> {
+    std::fs::read_to_string(crate::library::data_dir().join("looks.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+pub fn save_looks(looks: &[SavedLook]) {
+    let f = crate::library::data_dir().join("looks.json");
+    if let Some(d) = f.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    if let Ok(s) = serde_json::to_string_pretty(looks) {
+        let _ = std::fs::write(f, s);
+    }
+}
+
 
 impl CustomTheme {
     fn file() -> PathBuf {
@@ -231,6 +482,9 @@ impl Theme {
 
     /// Selected icon tint.
     pub fn accent(self) -> Color32 {
+        if let Some(c) = *ACCENT.read().unwrap() {
+            return rgb(c);
+        }
         match self {
             Theme::Cherry => Color32::from_rgb(255, 183, 197),
             Theme::Stars => Color32::from_rgb(220, 228, 255),
@@ -266,21 +520,30 @@ impl Theme {
         Some(crate::library::data_dir().join("theme"))
     }
 
+    /// The name it's saved under.
+    pub fn key(self) -> &'static str {
+        match self {
+            Theme::Light => "light",
+            Theme::Dark => "dark",
+            Theme::Cherry => "cherry",
+            Theme::Stars => "stars",
+            Theme::Bubbles => "bubbles",
+            Theme::Custom => "custom",
+        }
+    }
+
+    pub fn from_key(s: &str) -> Theme {
+        Theme::ALL.into_iter().find(|t| t.key() == s.trim()).unwrap_or(Theme::Dark)
+    }
+
     pub fn load() -> Theme {
         // Debug: STARLITE_THEME=light|dark|cherry|stars|bubbles|custom overrides the saved theme.
         let s = std::env::var("STARLITE_THEME")
             .ok()
             .or_else(|| Self::file().and_then(|f| std::fs::read_to_string(f).ok()))
             .unwrap_or_default();
-        match s.trim() {
-            "light" => Theme::Light,
-            "cherry" => Theme::Cherry,
-            "stars" => Theme::Stars,
-            "bubbles" => Theme::Bubbles,
-            "custom" => Theme::Custom,
-            // Dark is the default for new installs.
-            _ => Theme::Dark,
-        }
+        // Dark is the default for new installs.
+        Theme::from_key(&s)
     }
 
     pub fn save(self) {
@@ -292,15 +555,7 @@ impl Theme {
             if let Some(dir) = f.parent() {
                 let _ = std::fs::create_dir_all(dir);
             }
-            let v = match self {
-                Theme::Light => "light",
-                Theme::Dark => "dark",
-                Theme::Cherry => "cherry",
-                Theme::Stars => "stars",
-                Theme::Bubbles => "bubbles",
-                Theme::Custom => "custom",
-            };
-            let _ = std::fs::write(f, v);
+            let _ = std::fs::write(f, self.key());
         }
     }
 }
@@ -315,6 +570,29 @@ mod tests {
         assert!(!c.is_light());
         c.background = [235, 230, 220];
         assert!(c.is_light());
+    }
+
+    #[test]
+    fn looks_read_old_files_and_keep_in_range() {
+        let old: LookPrefs = serde_json::from_str(r#"{"liquid_glass": true}"#).unwrap();
+        assert_eq!(old.liquid_glass, Some(true));
+        let mut p = old;
+        if p.liquid_glass.take() == Some(true) {
+            p.style = Style::Liquid;
+        }
+        assert_eq!((p.style, p.advanced, p.rows, p.nav_width), (Style::Liquid, false, RowSize::Normal, 232.0));
+        let wild = LookPrefs { round: Some(500.0), text_size: 9.0, nav_width: f32::NAN, font: Some("  ".into()), ..Default::default() }.clamped();
+        assert_eq!((wild.round, wild.text_size, wild.nav_width, wild.font), (Some(40.0), 1.2, 232.0, None));
+        // Written out, the old switch is gone.
+        assert!(!serde_json::to_string(&LookPrefs::default()).unwrap().contains("liquid_glass"));
+    }
+
+    #[test]
+    fn themes_round_trip_by_name() {
+        for t in Theme::ALL {
+            assert_eq!(Theme::from_key(t.key()), t);
+        }
+        assert_eq!(Theme::from_key("nonsense"), Theme::Dark);
     }
 
     #[test]

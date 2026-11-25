@@ -90,6 +90,8 @@ pub struct Updater {
     /// "Later" was pressed: not again until the next start.
     later: bool,
     checked: Instant,
+    /// When "Check for updates" was last pressed.
+    pub checked_by_hand: Option<Instant>,
 }
 
 /// Is version `a` newer than `b`? ("0.10.0" is newer than "0.9.3".)
@@ -102,8 +104,27 @@ pub fn newer(a: &str, b: &str) -> bool {
     x > y
 }
 
+#[cfg(windows)]
+const EXE_NAME: &str = "Starlite.exe";
+#[cfg(not(windows))]
+const EXE_NAME: &str = "starlite";
+#[cfg(windows)]
+const OLD_NAME: &str = "Starlite.old.exe";
+#[cfg(not(windows))]
+const OLD_NAME: &str = "starlite.old";
+
 /// Debug: STARLITE_UPDATE_API=http://127.0.0.1:<port>/latest asks a test
 /// server on this PC instead of GitHub.
+/// The download for this system, and where its checksum is in the notes.
+#[cfg(windows)]
+const ASSET_END: &str = "-windows-x64.zip";
+#[cfg(not(windows))]
+const ASSET_END: &str = "-linux-x86_64.tar.gz";
+#[cfg(windows)]
+const SHA_LABEL: &str = "SHA-256:";
+#[cfg(not(windows))]
+const SHA_LABEL: &str = "SHA-256 (Linux):";
+
 fn test_api() -> Option<String> {
     std::env::var("STARLITE_UPDATE_API").ok().filter(|u| u.starts_with("http://127.0.0.1:"))
 }
@@ -113,15 +134,15 @@ fn parse_release(v: &Value, local_test: bool) -> Option<Release> {
     let version = v["tag_name"].as_str()?.trim_start_matches('v').to_string();
     let url = v["assets"].as_array()?.iter().find_map(|a| {
         let name = a["name"].as_str()?;
-        (name.starts_with("Starlite-") && name.ends_with("-windows-x64.zip")).then(|| a["browser_download_url"].as_str()).flatten()
+        (name.starts_with("Starlite-") && name.ends_with(ASSET_END)).then(|| a["browser_download_url"].as_str()).flatten()
     })?;
     if !(url.starts_with(DOWNLOADS) || (local_test && url.starts_with("http://127.0.0.1:"))) {
         return None;
     }
-    // "SHA-256: `ABC…`" in the notes.
+    // "SHA-256: `ABC…`" in the notes (Linux: "SHA-256 (Linux): `ABC…`").
     let body = v["body"].as_str().unwrap_or("");
-    let at = body.find("SHA-256")?;
-    let sha: String = body[at + 7..].chars().skip_while(|c| !c.is_ascii_hexdigit()).take_while(|c| c.is_ascii_hexdigit()).collect();
+    let at = body.find(SHA_LABEL)?;
+    let sha: String = body[at + SHA_LABEL.len()..].chars().skip_while(|c| !c.is_ascii_hexdigit()).take_while(|c| c.is_ascii_hexdigit()).collect();
     (sha.len() == 64).then(|| Release { version, url: url.to_string(), sha256: sha.to_lowercase() })
 }
 
@@ -162,10 +183,13 @@ fn fetch(rel: &Release, progress: &dyn Fn(f32)) -> Result<PathBuf, String> {
     let dir = crate::library::data_dir().join("update");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("Couldn't unpack the update ({e})"))?;
-    let zip = dir.join("update.zip");
+    let zip = dir.join(if cfg!(windows) { "update.zip" } else { "update.tar.gz" });
     std::fs::write(&zip, &bytes).map_err(|e| format!("Couldn't save the update ({e})"))?;
     // Windows' own tar unpacks zips (from System32, not whatever is on the PATH).
+    #[cfg(windows)]
     let tar = PathBuf::from(std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into())).join("System32").join("tar.exe");
+    #[cfg(not(windows))]
+    let tar = PathBuf::from("/usr/bin/tar");
     let mut cmd = std::process::Command::new(tar);
     cmd.arg("-xf").arg(&zip).arg("-C").arg(&dir);
     #[cfg(windows)]
@@ -174,7 +198,7 @@ fn fetch(rel: &Release, progress: &dyn Fn(f32)) -> Result<PathBuf, String> {
         cmd.creation_flags(0x0800_0000); // no console window
     }
     let ok = cmd.status().map(|s| s.success()).unwrap_or(false);
-    let exe = dir.join("Starlite.exe");
+    let exe = dir.join(EXE_NAME);
     if !ok || !exe.is_file() {
         return Err("Couldn't unpack the update".into());
     }
@@ -186,13 +210,18 @@ fn fetch(rel: &Release, progress: &dyn Fn(f32)) -> Result<PathBuf, String> {
 /// and starts it.
 fn swap_and_start(new: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let old = exe.with_file_name("Starlite.old.exe");
+    let old = exe.with_file_name(OLD_NAME);
     let _ = std::fs::remove_file(&old);
     let cant = |e: std::io::Error| format!("Starlite can't change its own folder ({e}). Download the new version from the release page instead.");
     std::fs::rename(&exe, &old).map_err(cant)?;
     if let Err(e) = std::fs::copy(new, &exe) {
         let _ = std::fs::rename(&old, &exe);
         return Err(cant(e));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
     }
     // The notices that come with it.
     let _ = std::fs::copy(new.with_file_name("THIRD-PARTY-NOTICES.txt"), exe.with_file_name("THIRD-PARTY-NOTICES.txt"));
@@ -208,10 +237,10 @@ impl Updater {
     pub fn start(ctx: &egui::Context) -> Self {
         // What the last update left behind.
         if let Ok(exe) = std::env::current_exe() {
-            let _ = std::fs::remove_file(exe.with_file_name("Starlite.old.exe"));
+            let _ = std::fs::remove_file(exe.with_file_name(OLD_NAME));
         }
         let _ = std::fs::remove_dir_all(crate::library::data_dir().join("update"));
-        let me = Self { prefs: UpdatePrefs::load(), phase: Default::default(), open: false, open_t: 0.0, later: false, checked: Instant::now() };
+        let me = Self { prefs: UpdatePrefs::load(), phase: Default::default(), open: false, open_t: 0.0, later: false, checked: Instant::now(), checked_by_hand: None };
         me.check(ctx, Duration::from_secs(3));
         me
     }
@@ -284,7 +313,80 @@ impl Updater {
     }
 }
 
+impl Updater {
+    /// Looks for a new version now (from Settings → About), even with notices off.
+    pub fn check_now(&mut self, ctx: &egui::Context) {
+        self.later = false;
+        let notify = self.prefs.notify;
+        self.prefs.notify = true;
+        self.check(ctx, Duration::ZERO);
+        self.prefs.notify = notify;
+        self.checked_by_hand = Some(Instant::now());
+    }
+}
+
 impl Starlite {
+    /// Settings → General: updates and where your things are.
+    #[allow(clippy::too_many_arguments)]
+    pub fn updates_group(&mut self, ui: &mut egui::Ui, icons: &mut Icons, els: &mut Vec<El>, ppp: f32, x: f32, y: f32, w: f32) -> f32 {
+        use crate::settings::{button, button_w, row_h, row_label, switch_row, Group};
+        let theme = self.theme;
+        let ctx = ui.ctx().clone();
+        let mut g = Group::new(ui, els, theme, x, y, w, Some("Updates"));
+        let r = g.row(ui, theme, row_h(true));
+        let checking = self.updater.checked_by_hand.is_some_and(|t| t.elapsed() < Duration::from_secs(6));
+        let phase = self.updater.phase();
+        let ready = matches!(phase, Phase::Available(_));
+        let sub = match (checking, ready) {
+            (_, true) => "A new version is ready to install",
+            (true, _) => "Checking\u{2026}",
+            _ if self.updater.checked_by_hand.is_some() => "You have the newest version",
+            _ => "A music player for your own songs, Navidrome, Jellyfin and YouTube",
+        };
+        let label = if ready { "Install update" } else { "Check for updates" };
+        let bw = button_w(ui, label, false);
+        row_label(ui, theme, r, concat!("Starlite ", env!("CARGO_PKG_VERSION")), Some(sub), r.width() - bw - 16.0);
+        let br = Rect::from_min_size(pos2(r.right() - bw, r.center().y - 15.0), egui::vec2(bw, 30.0));
+        if button(ui, icons, els, ppp, egui::Id::new("upd_check"), br, label, None, theme).clicked() {
+            self.sound.click();
+            if ready {
+                self.updater.open = true;
+            } else {
+                self.updater.check_now(&ctx);
+            }
+        }
+        if checking {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        }
+        let mut notify = self.updater.prefs.notify;
+        if switch_row(ui, theme, &mut g, egui::Id::new("update_notify"), "Tell me about new versions", Some("A small window when one is out"), &mut notify) {
+            self.sound.click();
+            self.updater.set_notify(notify, &ctx);
+        }
+        let y = g.end(els, ppp);
+
+        let mut g = Group::new(ui, els, theme, x, y, w, Some("Files"));
+        let rows: [(&str, &str, &str, &str); 2] = [
+            ("open_data", "Data folder", "Your settings, playlists and logins", "Open"),
+            ("open_github", "Release notes", "What changed in each version, on GitHub", "Open"),
+        ];
+        for (id, name, sub, label) in rows {
+            let r = g.row(ui, theme, row_h(true));
+            let bw = button_w(ui, label, true);
+            row_label(ui, theme, r, name, Some(sub), r.width() - bw - 16.0);
+            let br = Rect::from_min_size(pos2(r.right() - bw, r.center().y - 15.0), egui::vec2(bw, 30.0));
+            if button(ui, icons, els, ppp, egui::Id::new(id), br, label, Some("external-link"), theme).clicked() {
+                self.sound.click();
+                if id == "open_data" {
+                    crate::win::open(crate::library::data_dir().as_os_str());
+                } else {
+                    ctx.open_url(egui::OpenUrl::new_tab(PAGE));
+                }
+            }
+        }
+        g.end(els, ppp)
+    }
+
     /// The update window: what's new, Later, Install.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_update(&mut self, ui: &mut egui::Ui, icons: &mut Icons, ppp: f32, dt: f32, full: Rect, time: f32, nav_w: f32, animating: &mut bool) {

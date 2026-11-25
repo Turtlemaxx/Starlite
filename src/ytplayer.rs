@@ -1,17 +1,18 @@
-//! YouTube's official embedded player (IFrame Player API) in a WebView2
-//! child window. Starlite serves a tiny page from its own `starlite://`
-//! scheme (seen by the web view as `https://starlite.player`), so YouTube
-//! gets a real origin, as its embed rules require.
+//! YouTube's official embedded player (IFrame Player API) in a web view
+//! inside the window (WebView2 on Windows, WebKitGTK on Linux). Starlite
+//! serves a tiny page, so YouTube gets a real origin, as its embed rules
+//! require: on Windows from its own `starlite://` scheme (seen by the web
+//! view as `https://starlite.player`), on Linux from a small web server on
+//! this computer only (`http://127.0.0.1:<port>`).
 //!
 //! Rules this follows: the player stays visible (at least 200×200) while it
 //! plays, YouTube's ads and branding are untouched, and the audio is never
 //! separated from the video or saved.
 
 use std::borrow::Cow;
-use std::num::NonZeroIsize;
 use std::sync::{Arc, Mutex};
 
-use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle};
+use raw_window_handle::{HandleError, HasWindowHandle, RawWindowHandle, WindowHandle};
 use serde_json::Value;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::http::{header::CONTENT_TYPE, Response};
@@ -68,10 +69,37 @@ function ctl(c, v) {
 struct Parent(isize);
 
 impl HasWindowHandle for Parent {
+    #[cfg(windows)]
     fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
-        let h = Win32WindowHandle::new(NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?);
+        let h = raw_window_handle::Win32WindowHandle::new(std::num::NonZeroIsize::new(self.0).ok_or(HandleError::Unavailable)?);
         Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Win32(h)) })
     }
+    #[cfg(not(windows))]
+    fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+        let h = raw_window_handle::XlibWindowHandle::new(self.0 as std::os::raw::c_ulong);
+        Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xlib(h)) })
+    }
+}
+
+/// Linux: serves the player page on this computer only (any path, one page).
+/// Returns its address.
+#[cfg(not(windows))]
+fn serve_page() -> Result<String, String> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("Couldn't start the YouTube player ({e})"))?;
+    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let mut s = stream;
+            let _ = s.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut buf = [0u8; 4096];
+            let _ = s.read(&mut buf);
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", PAGE.len());
+            let _ = s.write_all(head.as_bytes());
+            let _ = s.write_all(PAGE.as_bytes());
+        }
+    });
+    Ok(format!("http://127.0.0.1:{port}/"))
 }
 
 pub struct YtPlayer {
@@ -107,15 +135,24 @@ impl YtPlayer {
 
         #[cfg(windows)]
         use wry::WebViewBuilderExtWindows;
-        let webview = WebViewBuilder::new()
-            .with_https_scheme(true)
+        #[cfg(windows)]
+        let url = "https://starlite.player/".to_string();
+        #[cfg(not(windows))]
+        let url = {
+            gtk::init().map_err(|e| format!("Couldn't start the YouTube player (GTK: {e})"))?;
+            serve_page()?
+        };
+        let builder = WebViewBuilder::new();
+        #[cfg(windows)]
+        let builder = builder.with_https_scheme(true);
+        let webview = builder
             .with_custom_protocol("starlite".into(), |_id, _req| {
                 Response::builder()
                     .header(CONTENT_TYPE, "text/html; charset=utf-8")
                     .body(Cow::Borrowed(PAGE.as_bytes()))
                     .unwrap()
             })
-            .with_url("https://starlite.player/")
+            .with_url(&url)
             .with_autoplay(true)
             .with_visible(false)
             .with_background_color((0, 0, 0, 255))
@@ -130,12 +167,12 @@ impl YtPlayer {
             // Only https links: anything else (file:, other protocols) is ignored.
             .with_new_window_req_handler(|url, _features| {
                 if url.starts_with("https://") && !url.contains(char::is_whitespace) {
-                    let _ = std::process::Command::new("rundll32").args(["url.dll,FileProtocolHandler", &url]).spawn();
+                    crate::win::open(std::ffi::OsStr::new(&url));
                 }
                 wry::NewWindowResponse::Deny
             })
             .build_as_child(&parent)
-            .map_err(|e| format!("Couldn't start the YouTube player (WebView2): {e}"))?;
+            .map_err(|e| format!("Couldn't start the YouTube player ({e})"))?;
         // WebView2 takes keyboard focus when it's created; give it back.
         let _ = webview.focus_parent();
         Ok(YtPlayer { webview, events, status: Status::Idle, pos: 0.0, dur: 0.0, pos_at: std::time::Instant::now(), speed: 1.0, finished: 0, bounds: None, visible: false })

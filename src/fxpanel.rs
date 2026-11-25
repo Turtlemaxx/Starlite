@@ -150,7 +150,7 @@ impl Starlite {
             self.fx_pop = None;
             self.fullscreen = false;
             self.view = crate::app::View::Settings;
-            self.settings_tab = 2;
+            self.settings_tab = crate::settings::EQUALIZER;
             return;
         }
         if (values[0] - self.fx.speed).abs() > 1e-4 {

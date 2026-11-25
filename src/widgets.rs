@@ -14,6 +14,8 @@ use crate::library::Cover;
 use crate::theme::Theme;
 
 pub fn font(size: f32, family: &str) -> FontId {
+    // Settings → Appearance → Advanced → Text size.
+    let size = size * crate::theme::text_scale();
     if family == "regular" {
         FontId::proportional(size)
     } else {
@@ -148,6 +150,33 @@ pub fn pill(
         x += 24.0;
     }
     p.galley(pos2(x, rect.center().y - g.size().y * 0.5), g, theme.text());
+    resp
+}
+
+/// The page's main button: filled with the accent.
+#[allow(clippy::too_many_arguments)]
+pub fn primary(ui: &Ui, icons: &mut Icons, id: Id, rect: Rect, label: &str, icon: Option<&'static str>, theme: Theme) -> Response {
+    let resp = ui.interact(rect, id, Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+    let ctx = ui.ctx();
+    let h = ctx.animate_bool_with_time(id.with("h"), resp.hovered(), 0.12);
+    let pr = ctx.animate_bool_with_time(id.with("p"), resp.is_pointer_button_down_on(), 0.08);
+    let r = Rect::from_center_size(rect.center(), rect.size() - Vec2::splat(2.0 * pr));
+    let a = theme.accent();
+    let bright = 0.2126 * a.r() as f32 + 0.7152 * a.g() as f32 + 0.0722 * a.b() as f32 > 150.0;
+    // A little lighter on hover (darker for a very light accent).
+    let fill = if bright { a.lerp_to_gamma(Color32::BLACK, 0.08 * h) } else { a.lerp_to_gamma(Color32::WHITE, 0.10 * h) };
+    let fg = if bright { Color32::from_rgb(18, 18, 20) } else { Color32::WHITE };
+    let p = ui.painter();
+    p.rect_filled(r, CornerRadius::same((r.height() * 0.5) as u8), fill);
+    let f = font(13.5, "semibold");
+    let g = p.layout_no_wrap(label.to_owned(), f, fg);
+    let total = g.size().x + if icon.is_some() { 22.0 } else { 0.0 };
+    let mut x = r.center().x - total * 0.5;
+    if let Some(ic) = icon {
+        icons.paint(ui, ic, pos2(x + 7.0, r.center().y), 15.0, fg);
+        x += 22.0;
+    }
+    p.galley(pos2(x, r.center().y - g.size().y * 0.5), g, fg);
     resp
 }
 
@@ -360,7 +389,7 @@ pub fn line_slider(ui: &Ui, id: Id, a: Pos2, b: Pos2, value: f32, s: &Slide, fg:
     if (shown - out.value).abs() < (s.max - s.min) * 0.0005 {
         shown = out.value;
     } else {
-        ctx.request_repaint();
+        ctx.request_repaint_after(std::time::Duration::from_micros(1));
     }
     ctx.data_mut(|d| d.insert_temp(shown_id, shown));
     let hv = ctx.animate_bool_with_time(id.with("h"), (resp.hovered() || resp.dragged()) && enabled, 0.16);

@@ -72,6 +72,8 @@ pub struct NowPlaying<'a> {
     pub fullscreen: bool,
     /// Speed or bass changed from normal (the sliders button lights up).
     pub fx_on: bool,
+    /// Buttons switched off in Settings (see `theme::BAR_BUTTONS`).
+    pub hidden: &'a [String],
 }
 
 pub enum Action {
@@ -410,71 +412,82 @@ impl Player {
         }
 
         // ── Download · add · like · loop ────────────────────────────
-        let dl_c = pos2(mute_c.x - 44.0, cy);
-        let add_c = pos2(dl_c.x - 38.0, cy);
-        let like_c = pos2(add_c.x - 38.0, cy);
-        let loop_c = pos2(like_c.x - 38.0, cy);
-        let fx_c = pos2(loop_c.x - 38.0, cy);
-        for c in [dl_c, add_c, like_c, loop_c, fx_c] {
+        // Right to left; switched-off ones leave no gap.
+        let mut slot_x = mute_c.x - 44.0;
+        let mut slot = |name: &str| -> Option<Pos2> {
+            if now.hidden.iter().any(|h| h == name) {
+                return None;
+            }
+            let c = pos2(slot_x, cy);
+            slot_x -= 38.0;
+            Some(c)
+        };
+        let (dl_c, add_c, like_c, loop_c, fx_c) = (slot("download"), slot("add"), slot("like"), slot("loop"), slot("fx"));
+        for c in [dl_c, add_c, like_c, loop_c, fx_c].into_iter().flatten() {
             ctl.push(Rect::from_center_size(c, Vec2::splat(34.0)));
         }
 
         // YouTube's terms don't allow downloading its songs; local
         // files are already in Downloaded Music. (Navidrome downloads later.)
-        let remote = now.track.and_then(|t| t.source_name());
-        let dl = round_button(ui, id.with("dl"), dl_c, 34.0, 0.0, 0.0, ppp, els, false);
-        let dl_tip = if remote.is_some() {
-            "YouTube doesn't allow downloading songs in other apps"
-        } else if has_track {
-            "Already in Downloaded Music"
-        } else {
-            "Download"
-        };
-        dl.on_hover_text(dl_tip);
-        let sc = remote.is_some();
-        icons.paint(ui, if has_track && !sc { "check" } else { "download" }, dl_c, 17.0, dim.gamma_multiply(if has_track { 1.0 } else { 0.6 }));
-
-        let add = round_button(ui, id.with("add"), add_c, 34.0, 0.0, 0.0, ppp, els, has_track).on_hover_text("Add to playlist");
-        if add.clicked() {
-            out.clicked = true;
-            out.actions.push(Action::AddTo(add_c));
+        if let Some(dl_c) = dl_c {
+            let remote = now.track.and_then(|t| t.source_name());
+            let dl = round_button(ui, id.with("dl"), dl_c, 34.0, 0.0, 0.0, ppp, els, false);
+            let dl_tip = if remote.is_some() {
+                "YouTube doesn't allow downloading songs in other apps"
+            } else if has_track {
+                "Already in Downloaded Music"
+            } else {
+                "Download"
+            };
+            dl.on_hover_text(dl_tip);
+            let sc = remote.is_some();
+            icons.paint(ui, if has_track && !sc { "check" } else { "download" }, dl_c, 17.0, dim.gamma_multiply(if has_track { 1.0 } else { 0.6 }));
         }
-        icons.paint(ui, "list-plus", add_c, 17.0, if has_track { fg } else { dim });
-
-        let like = round_button(ui, id.with("like"), like_c, 34.0, 0.0, 0.0, ppp, els, has_track).on_hover_text(if now.liked { "Remove from Liked Music" } else { "Add to Liked Music" });
-        if like.clicked() {
-            self.like_pop.v = 3.5;
-            out.clicked = true;
-            out.actions.push(Action::Like);
+        if let Some(add_c) = add_c {
+            let add = round_button(ui, id.with("add"), add_c, 34.0, 0.0, 0.0, ppp, els, has_track).on_hover_text("Add to playlist");
+            if add.clicked() {
+                out.clicked = true;
+                out.actions.push(Action::AddTo(add_c));
+            }
+            icons.paint(ui, "list-plus", add_c, 17.0, if has_track { fg } else { dim });
         }
-        out.animating |= self.like_pop.step(dt, 320.0, 13.0);
-        let ls = 17.0 * (1.0 + 0.14 * self.like_pop.x);
-        if now.liked {
-            icons.paint(ui, "heart-fill", like_c, ls, if theme == Theme::Light { Color32::from_rgb(232, 64, 96) } else { accent });
-        } else {
-            icons.paint(ui, "heart", like_c, ls, if has_track { fg } else { dim });
+        if let Some(like_c) = like_c {
+            let like = round_button(ui, id.with("like"), like_c, 34.0, 0.0, 0.0, ppp, els, has_track).on_hover_text(if now.liked { "Remove from Liked Music" } else { "Add to Liked Music" });
+            if like.clicked() {
+                self.like_pop.v = 3.5;
+                out.clicked = true;
+                out.actions.push(Action::Like);
+            }
+            out.animating |= self.like_pop.step(dt, 320.0, 13.0);
+            let ls = 17.0 * (1.0 + 0.14 * self.like_pop.x);
+            if now.liked {
+                icons.paint(ui, "heart-fill", like_c, ls, if theme == Theme::Light { Color32::from_rgb(232, 64, 96) } else { accent });
+            } else {
+                icons.paint(ui, "heart", like_c, ls, if has_track { fg } else { dim });
+            }
         }
-
-        let active = ctx.animate_bool_with_time(id.with("loop_on"), self.looping != Loop::Off, 0.2);
-        let lr = round_button(ui, id.with("loop"), loop_c, 34.0, active, 0.2, ppp, els, true).on_hover_text(self.looping.tooltip());
-        if lr.clicked() {
-            self.looping = self.looping.next();
-            self.loop_pop.v = 3.0;
-            out.clicked = true;
+        if let Some(loop_c) = loop_c {
+            let active = ctx.animate_bool_with_time(id.with("loop_on"), self.looping != Loop::Off, 0.2);
+            let lr = round_button(ui, id.with("loop"), loop_c, 34.0, active, 0.2, ppp, els, true).on_hover_text(self.looping.tooltip());
+            if lr.clicked() {
+                self.looping = self.looping.next();
+                self.loop_pop.v = 3.0;
+                out.clicked = true;
+            }
+            out.animating |= self.loop_pop.step(dt, 320.0, 13.0);
+            let lsize = 18.0 * (1.0 + 0.12 * self.loop_pop.x);
+            let ltint = if self.looping == Loop::Off { dim } else { accent };
+            icons.paint(ui, if self.looping == Loop::One { "repeat-1" } else { "repeat" }, loop_c, lsize, ltint);
         }
-        out.animating |= self.loop_pop.step(dt, 320.0, 13.0);
-        let lsize = 18.0 * (1.0 + 0.12 * self.loop_pop.x);
-        let ltint = if self.looping == Loop::Off { dim } else { accent };
-        icons.paint(ui, if self.looping == Loop::One { "repeat-1" } else { "repeat" }, loop_c, lsize, ltint);
-
-        // Speed and bass.
-        let fx_on = ctx.animate_bool_with_time(id.with("fx_on"), now.fx_on, 0.2);
-        if round_button(ui, id.with("fx"), fx_c, 34.0, fx_on, 0.2, ppp, els, true).on_hover_text("Speed and bass").clicked() {
-            out.clicked = true;
-            out.actions.push(Action::Sound(fx_c));
+        if let Some(fx_c) = fx_c {
+            // Speed and bass.
+            let fx_on = ctx.animate_bool_with_time(id.with("fx_on"), now.fx_on, 0.2);
+            if round_button(ui, id.with("fx"), fx_c, 34.0, fx_on, 0.2, ppp, els, true).on_hover_text("Speed and bass").clicked() {
+                out.clicked = true;
+                out.actions.push(Action::Sound(fx_c));
+            }
+            icons.paint(ui, "sliders-horizontal", fx_c, 17.0, if now.fx_on { accent } else { dim });
         }
-        icons.paint(ui, "sliders-horizontal", fx_c, 17.0, if now.fx_on { accent } else { dim });
-
         self.controls = ctl;
         out
     }
@@ -503,7 +516,7 @@ mod tests {
         let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1200.0, 760.0))), events, ..Default::default() };
         let _ = ctx.run(input, |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let now = NowPlaying { track: Some(track), playing: true, loading: false, liked: false, pos: 10.0, dur: 200.0, fullscreen: false, fx_on: false };
+                let now = NowPlaying { track: Some(track), playing: true, loading: false, liked: false, pos: 10.0, dur: 200.0, fullscreen: false, fx_on: false, hidden: &[] };
                 let mut els = Vec::new();
                 out = Some(player.ui(ui, icons, BAR, 1.0, 1.0 / 60.0, Theme::Dark, &mut els, now));
             });
